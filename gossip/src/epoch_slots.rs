@@ -1,7 +1,6 @@
 use {
     crate::{
-        crds_data::{self, MAX_SLOT, MAX_WALLCLOCK},
-        protocol::MAX_CRDS_OBJECT_SIZE,
+        crds_data::{self, MAX_SLOT, MAX_WALLCLOCK}
     },
     bincode::serialized_size,
     bv::BitVec,
@@ -12,6 +11,7 @@ use {
     std::{borrow::Cow, sync::Arc},
 };
 
+pub const MAX_CRDS_OBJECT_SIZE: usize = 928;
 pub const MAX_SLOTS_PER_ENTRY: usize = 2048 * 8;
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
