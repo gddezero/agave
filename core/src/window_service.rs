@@ -4,14 +4,20 @@
 
 use {
     crate::{
+        cluster_info_vote_listener::VerifiedVoteReceiver,
         completed_data_sets_service::CompletedDataSetsSender,
-        repair::repair_service::{
-            OutstandingShredRepairs, RepairInfo, RepairService, RepairServiceChannels,
+        repair::{
+            ancestor_hashes_service::AncestorHashesReplayUpdateReceiver,
+            repair_service::{
+                DumpedSlotsReceiver, OutstandingShredRepairs, PopularPrunedForksSender, RepairInfo,
+                RepairService,
+            },
         },
         result::{Error, Result},
     },
     agave_feature_set as feature_set,
     assert_matches::debug_assert_matches,
+    bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
     rayon::{prelude::*, ThreadPool},
     solana_gossip::cluster_info::ClusterInfo,
@@ -24,12 +30,13 @@ use {
     solana_metrics::inc_new_counter_error,
     solana_rayon_threadlimit::get_thread_count,
     solana_runtime::bank_forks::BankForks,
-    solana_sdk::clock::{Slot, DEFAULT_MS_PER_SLOT},
-    solana_streamer::evicting_sender::EvictingSender,
+    solana_sdk::{
+        clock::{Slot, DEFAULT_MS_PER_SLOT},
+        pubkey::Pubkey,
+    },
     solana_turbine::cluster_nodes,
     std::{
-        borrow::Cow,
-        net::UdpSocket,
+        net::{SocketAddr, UdpSocket},
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, RwLock,
@@ -37,6 +44,7 @@ use {
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
     },
+    tokio::sync::mpsc::Sender as AsyncSender,
 };
 
 type DuplicateSlotSender = Sender<Slot>;
@@ -188,7 +196,7 @@ fn run_insert<F>(
     metrics: &mut BlockstoreInsertionMetrics,
     ws_metrics: &mut WindowServiceMetrics,
     completed_data_sets_sender: Option<&CompletedDataSetsSender>,
-    retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
+    retransmit_sender: &Sender<Vec<shred::Payload>>,
     reed_solomon_cache: &ReedSolomonCache,
     accept_repairs_only: bool,
 ) -> Result<()>
@@ -213,7 +221,7 @@ where
             debug_assert_matches!(shred, shred::Payload::Shared(_));
         }
         let shred = Shred::new_from_serialized_shred(shred).ok()?;
-        Some((Cow::Owned(shred), repair))
+        Some((shred, repair))
     };
     let now = Instant::now();
     let shreds: Vec<_> = thread_pool.install(|| {
@@ -242,32 +250,6 @@ where
     Ok(())
 }
 
-pub struct WindowServiceChannels {
-    pub verified_receiver: Receiver<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
-    pub retransmit_sender: EvictingSender<Vec<shred::Payload>>,
-    pub completed_data_sets_sender: Option<CompletedDataSetsSender>,
-    pub duplicate_slots_sender: DuplicateSlotSender,
-    pub repair_service_channels: RepairServiceChannels,
-}
-
-impl WindowServiceChannels {
-    pub fn new(
-        verified_receiver: Receiver<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
-        retransmit_sender: EvictingSender<Vec<shred::Payload>>,
-        completed_data_sets_sender: Option<CompletedDataSetsSender>,
-        duplicate_slots_sender: DuplicateSlotSender,
-        repair_service_channels: RepairServiceChannels,
-    ) -> Self {
-        Self {
-            verified_receiver,
-            retransmit_sender,
-            completed_data_sets_sender,
-            duplicate_slots_sender,
-            repair_service_channels,
-        }
-    }
-}
-
 pub(crate) struct WindowService {
     t_insert: JoinHandle<()>,
     t_check_duplicate: JoinHandle<()>,
@@ -275,14 +257,25 @@ pub(crate) struct WindowService {
 }
 
 impl WindowService {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         blockstore: Arc<Blockstore>,
+        verified_receiver: Receiver<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
+        retransmit_sender: Sender<Vec<shred::Payload>>,
         repair_socket: Arc<UdpSocket>,
         ancestor_hashes_socket: Arc<UdpSocket>,
+        repair_request_quic_sender: AsyncSender<(SocketAddr, Bytes)>,
+        ancestor_hashes_request_quic_sender: AsyncSender<(SocketAddr, Bytes)>,
+        ancestor_hashes_response_quic_receiver: Receiver<(Pubkey, SocketAddr, Bytes)>,
         exit: Arc<AtomicBool>,
         repair_info: RepairInfo,
-        window_service_channels: WindowServiceChannels,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
+        verified_vote_receiver: VerifiedVoteReceiver,
+        completed_data_sets_sender: Option<CompletedDataSetsSender>,
+        duplicate_slots_sender: DuplicateSlotSender,
+        ancestor_hashes_replay_update_receiver: AncestorHashesReplayUpdateReceiver,
+        dumped_slots_receiver: DumpedSlotsReceiver,
+        popular_pruned_forks_sender: PopularPrunedForksSender,
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
     ) -> WindowService {
         let cluster_info = repair_info.cluster_info.clone();
@@ -292,22 +285,20 @@ impl WindowService {
         // avoid new shreds make validator OOM before wen_restart is over.
         let accept_repairs_only = repair_info.wen_restart_repair_slots.is_some();
 
-        let WindowServiceChannels {
-            verified_receiver,
-            retransmit_sender,
-            completed_data_sets_sender,
-            duplicate_slots_sender,
-            repair_service_channels,
-        } = window_service_channels;
-
         let repair_service = RepairService::new(
             blockstore.clone(),
             exit.clone(),
             repair_socket,
             ancestor_hashes_socket,
+            repair_request_quic_sender,
+            ancestor_hashes_request_quic_sender,
+            ancestor_hashes_response_quic_receiver,
             repair_info,
+            verified_vote_receiver,
             outstanding_repair_requests.clone(),
-            repair_service_channels,
+            ancestor_hashes_replay_update_receiver,
+            dumped_slots_receiver,
+            popular_pruned_forks_sender,
         );
 
         let (duplicate_sender, duplicate_receiver) = unbounded();
@@ -377,7 +368,7 @@ impl WindowService {
         verified_receiver: Receiver<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
         check_duplicate_sender: Sender<PossibleDuplicateShred>,
         completed_data_sets_sender: Option<CompletedDataSetsSender>,
-        retransmit_sender: EvictingSender<Vec<shred::Payload>>,
+        retransmit_sender: Sender<Vec<shred::Payload>>,
         accept_repairs_only: bool,
     ) -> JoinHandle<()> {
         let handle_error = || {
@@ -599,7 +590,7 @@ mod test {
             let _ = duplicate_shred_sender.send(shred);
         };
         let num_trials = 100;
-        let (dummy_retransmit_sender, _) = EvictingSender::new_bounded(0);
+        let (dummy_retransmit_sender, _) = crossbeam_channel::bounded(0);
         for slot in 0..num_trials {
             let (shreds, _) = make_many_slot_entries(slot, 1, 10);
             let duplicate_index = 0;
@@ -610,9 +601,9 @@ mod test {
             };
             assert_eq!(duplicate_shred.slot(), slot);
             // Simulate storing both duplicate shreds in the same batch
-            let shreds = [&original_shred, &duplicate_shred]
+            let shreds = [original_shred.clone(), duplicate_shred.clone()]
                 .into_iter()
-                .map(|shred| (Cow::Borrowed(shred), /*is_repaired:*/ false));
+                .map(|shred| (shred, /*is_repaired:*/ false));
             blockstore
                 .insert_shreds_handle_duplicate(
                     shreds,

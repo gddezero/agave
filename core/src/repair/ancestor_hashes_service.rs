@@ -171,7 +171,7 @@ impl AncestorHashesService {
             Arc::new(StreamerReceiveStats::new(
                 "ancestor_hashes_response_receiver",
             )),
-            Duration::from_millis(1),       // coalesce
+            Some(Duration::from_millis(1)), // coalesce
             false,                          // use_pinned_memory
             None,                           // in_vote_only_mode
             false,                          // is_staked_service
