@@ -12,6 +12,7 @@ pub mod crds_gossip_pull;
 pub mod crds_gossip_push;
 pub mod crds_shards;
 pub mod crds_value;
+pub mod crds_data;
 mod deprecated;
 pub mod duplicate_shred;
 pub mod duplicate_shred_handler;
@@ -23,6 +24,7 @@ pub mod gossip_service;
 #[macro_use]
 mod legacy_contact_info;
 pub mod ping_pong;
+mod protocol;
 mod push_active_set;
 mod received_cache;
 pub mod restart_crds_values;

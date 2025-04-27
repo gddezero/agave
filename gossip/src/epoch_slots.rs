@@ -112,10 +112,9 @@ impl Flate2 {
         let mut compressor = Compress::new(Compression::best(), false);
         let first_slot = unc.first_slot;
         let num = unc.num;
-        unc.slots = Arc::new(unc.slots.to_owned()); // Ensure unique ownership before moving
-        let bits = Arc::try_unwrap(unc.slots).unwrap_or_else(|arc| (*arc).clone()); // Clone if Arc has multiple owners
-        let bits_slice = bits.get_ref(); // Get a slice from BitVec
-        compressor.compress_vec(bits_slice, &mut compressed, FlushCompress::Finish)?;
+        Arc::make_mut(&mut unc.slots).shrink_to_fit();
+        let bits = Arc::unwrap_or_clone(unc.slots).into_boxed_slice();
+        compressor.compress_vec(&bits, &mut compressed, FlushCompress::Finish)?;
         let rv = Self {
             first_slot,
             num,
@@ -139,18 +138,18 @@ impl Flate2 {
 
 impl Uncompressed {
     pub fn new(max_size: usize) -> Self {
+        let slots = BitVec::new_fill(false, 8 * max_size as u64);
         Self {
             num: 0,
             first_slot: 0,
-            slots: Arc::new(BitVec::new_fill(false, 8 * max_size as u64)),
+            slots: Arc::new(slots),
         }
     }
-    pub fn to_slots(&self, min_slot: Slot) -> Vec<Slot> {
-        Uncompressed::get_slots(Cow::Borrowed(self), min_slot).collect()
+    #[cfg(test)]
+    fn to_slots(&self, min_slot: Slot) -> Vec<Slot> {
+        Self::get_slots(Cow::Borrowed(self), min_slot).collect()
     }
     pub fn add(&mut self, slots: &[Slot]) -> usize {
-        let mut num_added = 0;
-        let mut new_slots = None;
         for (i, s) in slots.iter().enumerate() {
             if self.num == 0 {
                 self.first_slot = *s;
@@ -161,23 +160,13 @@ impl Uncompressed {
             if *s < self.first_slot {
                 return i;
             }
-            let index = *s - self.first_slot;
-            if index >= self.slots.len() {
+            if *s - self.first_slot >= self.slots.len() {
                 return i;
             }
-            let slots_mut = new_slots.get_or_insert_with(|| {
-                Arc::make_mut(&mut self.slots).to_owned() // Clone the BitVec for mutation
-            });
-            if !slots_mut.get(index) { // Check if already set
-                slots_mut.set(index, true);
-                num_added += 1;
-            }
-            self.num = std::cmp::max(self.num, 1 + index as usize);
+            Arc::make_mut(&mut self.slots).set(*s - self.first_slot, true);
+            self.num = std::cmp::max(self.num, 1 + (*s - self.first_slot) as usize);
         }
-        if let Some(modified_slots) = new_slots {
-             self.slots = Arc::new(modified_slots); // Update the Arc if mutations occurred
-        }
-        slots.len() // Return total slots processed, not just added
+        slots.len()
     }
 
     fn get_slots(this: Cow<'_, Self>, min_slot: Slot) -> impl Iterator<Item = Slot> + '_ {
