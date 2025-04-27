@@ -503,8 +503,8 @@ impl ServeRepair {
                     error!("Unexpected legacy request: {request:?}");
                     debug_assert!(
                         false,
-                        "Legacy requests should have been filtered out during signature
-                        verification. {request:?}"
+                        "Legacy requests should have been filtered out during signature \
+                         verification. {request:?}"
                     );
                     (None, "Legacy")
                 }
@@ -649,7 +649,7 @@ impl ServeRepair {
         let identity_keypair = self.cluster_info.keypair().clone();
         let my_id = identity_keypair.pubkey();
 
-        let max_buffered_packets = if self.repair_whitelist.read().unwrap().len() > 0 {
+        let max_buffered_packets = if !self.repair_whitelist.read().unwrap().is_empty() {
             4 * MAX_REQUESTS_PER_ITERATION
         } else {
             2 * MAX_REQUESTS_PER_ITERATION
@@ -958,8 +958,8 @@ impl ServeRepair {
                     error!("Unexpected legacy request: {request:?}");
                     debug_assert!(
                         false,
-                        "Legacy requests should have been filtered out during signature
-                        verification. {request:?}"
+                        "Legacy requests should have been filtered out during signature \
+                         verification. {request:?}"
                     );
                     None
                 }
@@ -1127,10 +1127,7 @@ impl ServeRepair {
         if repair_peers.is_empty() {
             return Err(ClusterInfoError::NoPeers.into());
         }
-        let (weights, index): (Vec<_>, Vec<_>) = cluster_slots
-            .compute_weights_exclude_nonfrozen(slot, &repair_peers)
-            .into_iter()
-            .unzip();
+        let (weights, index) = cluster_slots.compute_weights_exclude_nonfrozen(slot, &repair_peers);
         let peers = WeightedShuffle::new("repair_request_ancestor_hashes", weights)
             .shuffle(&mut rand::thread_rng())
             .map(|i| index[i])
@@ -1154,10 +1151,7 @@ impl ServeRepair {
         if repair_peers.is_empty() {
             return None;
         }
-        let (weights, index): (Vec<_>, Vec<_>) = cluster_slots
-            .compute_weights_exclude_nonfrozen(slot, &repair_peers)
-            .into_iter()
-            .unzip();
+        let (weights, index) = cluster_slots.compute_weights_exclude_nonfrozen(slot, &repair_peers);
         let k = WeightedIndex::new(weights)
             .ok()?
             .sample(&mut rand::thread_rng());
@@ -1249,14 +1243,13 @@ impl ServeRepair {
             }
         }
         if !pending_pongs.is_empty() {
-            match batch_send(repair_socket, &pending_pongs) {
+            let num_pkts = pending_pongs.len();
+            let pending_pongs = pending_pongs.iter().map(|(bytes, addr)| (bytes, addr));
+            match batch_send(repair_socket, pending_pongs) {
                 Ok(()) => (),
                 Err(SendPktsError::IoError(err, num_failed)) => {
                     warn!(
-                        "batch_send failed to send {}/{} packets. First error: {:?}",
-                        num_failed,
-                        pending_pongs.len(),
-                        err
+                        "batch_send failed to send {num_failed}/{num_pkts} packets. First error: {err:?}"
                     );
                 }
             }
