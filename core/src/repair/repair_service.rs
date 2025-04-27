@@ -647,7 +647,7 @@ impl RepairService {
                             &mut repair_metrics.stats,
                             &repair_info.repair_validators,
                             &mut outstanding_requests,
-                            identity_keypair,
+                            &repair_info.cluster_info.keypair(),
                             repair_request_quic_sender,
                             repair_protocol,
                         )
@@ -660,7 +660,8 @@ impl RepairService {
 
         let mut batch_send_repairs_elapsed = Measure::start("batch_send_repairs_elapsed");
         if !batch.is_empty() {
-           match batch_send(repair_socket, &batch) {
+            let num_pkts = batch.len();
+            match batch_send(repair_socket, &batch) {
                 Ok(()) => (),
                 Err(SendPktsError::IoError(err, num_failed)) => {
                     error!(

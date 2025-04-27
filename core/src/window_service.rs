@@ -213,7 +213,7 @@ where
             debug_assert_matches!(shred, shred::Payload::Shared(_));
         }
         let shred = Shred::new_from_serialized_shred(shred).ok()?;
-        Some((Cow::Owned(shred), repair))
+        Some((shred, repair))
     };
     let now = Instant::now();
     let shreds: Vec<_> = thread_pool.install(|| {
