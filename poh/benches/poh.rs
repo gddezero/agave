@@ -5,6 +5,7 @@ extern crate test;
 
 use {
     solana_entry::poh::Poh,
+    solana_hash::Hash,
     solana_ledger::{
         blockstore::Blockstore,
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
@@ -13,12 +14,10 @@ use {
     },
     solana_perf::test_tx::test_tx,
     solana_poh::{poh_recorder::PohRecorder, poh_service::DEFAULT_HASHES_PER_BATCH},
+    solana_poh_config::PohConfig,
     solana_runtime::bank::Bank,
-    solana_sdk::{
-        hash::{hash, Hash},
-        poh_config::PohConfig,
-        transaction::SanitizedTransaction,
-    },
+    solana_sha256_hasher::hash,
+    solana_transaction::sanitized::SanitizedTransaction,
     std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -87,7 +86,7 @@ fn bench_poh_recorder_record_transaction_index(bencher: &mut Bencher) {
     let bank = Arc::new(Bank::new_for_tests(&genesis_config));
     let prev_hash = bank.last_blockhash();
 
-    let (mut poh_recorder, _entry_receiver, _record_receiver) = PohRecorder::new(
+    let (mut poh_recorder, _entry_receiver) = PohRecorder::new(
         0,
         prev_hash,
         bank.clone(),
@@ -137,7 +136,7 @@ fn bench_poh_recorder_set_bank(bencher: &mut Bencher) {
     let bank = Arc::new(Bank::new_for_tests(&genesis_config));
     let prev_hash = bank.last_blockhash();
 
-    let (mut poh_recorder, _entry_receiver, _record_receiver) = PohRecorder::new(
+    let (mut poh_recorder, _entry_receiver) = PohRecorder::new(
         0,
         prev_hash,
         bank.clone(),

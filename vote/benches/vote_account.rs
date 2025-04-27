@@ -3,12 +3,10 @@ extern crate test;
 
 use {
     rand::Rng,
-    solana_sdk::{
-        account::AccountSharedData,
-        pubkey::Pubkey,
-        vote::state::{VoteInit, VoteState, VoteStateVersions},
-    },
+    solana_account::AccountSharedData,
+    solana_pubkey::Pubkey,
     solana_vote::vote_account::VoteAccount,
+    solana_vote_interface::state::{VoteInit, VoteState, VoteStateVersions},
     test::Bencher,
 };
 
@@ -22,18 +20,19 @@ fn new_rand_vote_account<R: Rng>(
         authorized_withdrawer: Pubkey::new_unique(),
         commission: rng.gen(),
     };
-    let clock = solana_sdk::sysvar::clock::Clock {
+    let clock = solana_clock::Clock {
         slot: rng.gen(),
         epoch_start_timestamp: rng.gen(),
         epoch: rng.gen(),
         leader_schedule_epoch: rng.gen(),
         unix_timestamp: rng.gen(),
     };
-    let vote_state = VoteState::new(&vote_init, &clock);
+    let mut vote_state = VoteState::new(&vote_init, &clock);
+    vote_state.process_next_vote_slot(0, 0, 1);
     let account = AccountSharedData::new_data(
         rng.gen(), // lamports
         &VoteStateVersions::new_current(vote_state.clone()),
-        &solana_sdk::vote::program::id(), // owner
+        &solana_sdk_ids::vote::id(), // owner
     )
     .unwrap();
     (account, vote_state)
@@ -46,7 +45,11 @@ fn bench_vote_account_try_from(b: &mut Bencher) {
 
     b.iter(|| {
         let vote_account = VoteAccount::try_from(account.clone()).unwrap();
-        let state = vote_account.vote_state();
-        assert_eq!(state, &vote_state);
+        let vote_state_view = vote_account.vote_state_view();
+        assert_eq!(&vote_state.node_pubkey, vote_state_view.node_pubkey());
+        assert_eq!(vote_state.commission, vote_state_view.commission());
+        assert_eq!(vote_state.credits(), vote_state_view.credits());
+        assert_eq!(vote_state.last_timestamp, vote_state_view.last_timestamp());
+        assert_eq!(vote_state.root_slot, vote_state_view.root_slot());
     });
 }

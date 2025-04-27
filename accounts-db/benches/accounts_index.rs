@@ -4,6 +4,7 @@ extern crate test;
 
 use {
     rand::{thread_rng, Rng},
+    solana_account::AccountSharedData,
     solana_accounts_db::{
         account_info::AccountInfo,
         accounts_index::{
@@ -11,7 +12,6 @@ use {
             ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS,
         },
     },
-    solana_sdk::{account::AccountSharedData, pubkey},
     std::sync::Arc,
     test::Bencher,
 };
@@ -19,7 +19,9 @@ use {
 #[bench]
 fn bench_accounts_index(bencher: &mut Bencher) {
     const NUM_PUBKEYS: usize = 10_000;
-    let pubkeys: Vec<_> = (0..NUM_PUBKEYS).map(|_| pubkey::new_rand()).collect();
+    let pubkeys: Vec<_> = (0..NUM_PUBKEYS)
+        .map(|_| solana_pubkey::new_rand())
+        .collect();
 
     const NUM_FORKS: u64 = 16;
 

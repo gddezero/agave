@@ -2,13 +2,11 @@ use {
     crate::solana::wen_restart_proto::LastVotedForkSlotsRecord,
     anyhow::Result,
     log::*,
+    solana_clock::{Epoch, Slot},
     solana_gossip::restart_crds_values::RestartLastVotedForkSlots,
+    solana_hash::Hash,
+    solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
-    solana_sdk::{
-        clock::{Epoch, Slot},
-        hash::Hash,
-        pubkey::Pubkey,
-    },
     std::{
         collections::{BTreeSet, HashMap},
         str::FromStr,
@@ -247,16 +245,17 @@ mod tests {
             last_voted_fork_slots_aggregate::*, solana::wen_restart_proto::LastVotedForkSlotsRecord,
         },
         solana_gossip::restart_crds_values::RestartLastVotedForkSlots,
+        solana_hash::Hash,
         solana_program::clock::Slot,
         solana_runtime::{
-            accounts_background_service::AbsRequestSender,
             bank::Bank,
             epoch_stakes::EpochStakes,
             genesis_utils::{
                 create_genesis_config_with_vote_accounts, GenesisConfigInfo, ValidatorVoteKeypairs,
             },
         },
-        solana_sdk::{hash::Hash, signature::Signer, timing::timestamp},
+        solana_signer::Signer,
+        solana_time_utils::timestamp,
         solana_vote::vote_account::VoteAccount,
         solana_vote_program::vote_state::create_account_with_authorized,
     };
@@ -287,11 +286,7 @@ mod tests {
         let bank0 = bank_forks.read().unwrap().root_bank();
         let bank1 = Bank::new_from_parent(bank0.clone(), &Pubkey::default(), 1);
         bank_forks.write().unwrap().insert(bank1);
-        assert!(bank_forks
-            .write()
-            .unwrap()
-            .set_root(1, &AbsRequestSender::default(), None)
-            .is_ok());
+        assert!(bank_forks.write().unwrap().set_root(1, None, None).is_ok());
         let root_bank = bank_forks.read().unwrap().root_bank();
         let root_slot = root_bank.slot();
         let last_voted_fork_slots = vec![

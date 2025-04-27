@@ -5,10 +5,7 @@ use {
         immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
         packet_filter::PacketFilterFailure,
     },
-    crate::{
-        banking_trace::{BankingPacketBatch, BankingPacketReceiver},
-        sigverify::SigverifyTracerPacketStats,
-    },
+    agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
     crossbeam_channel::RecvTimeoutError,
     solana_perf::packet::PacketBatch,
     solana_sdk::saturating_add_assign,
@@ -19,8 +16,6 @@ use {
 pub struct ReceivePacketResults {
     /// Deserialized packets from all received packet batches
     pub deserialized_packets: Vec<ImmutableDeserializedPacket>,
-    /// Aggregate tracer stats for all received packet batches
-    pub new_tracer_stats_option: Option<SigverifyTracerPacketStats>,
     /// Counts of packets received and errors recorded during deserialization
     /// and filtering
     pub packet_stats: PacketReceiverStats,
@@ -112,10 +107,9 @@ impl PacketDeserializer {
     ) -> ReceivePacketResults {
         let mut packet_stats = PacketReceiverStats::default();
         let mut deserialized_packets = Vec::with_capacity(packet_count);
-        let mut aggregated_tracer_packet_stats_option = None::<SigverifyTracerPacketStats>;
 
         for banking_batch in banking_batches {
-            for packet_batch in &banking_batch.0 {
+            for packet_batch in banking_batch.iter() {
                 let packet_indexes = Self::generate_packet_indexes(packet_batch);
 
                 saturating_add_assign!(
@@ -134,23 +128,10 @@ impl PacketDeserializer {
                     &packet_filter,
                 ));
             }
-
-            if let Some(tracer_packet_stats) = &banking_batch.1 {
-                if let Some(aggregated_tracer_packet_stats) =
-                    &mut aggregated_tracer_packet_stats_option
-                {
-                    aggregated_tracer_packet_stats.aggregate(tracer_packet_stats);
-                } else {
-                    // BankingPacketBatch is owned by Arc; so we have to clone its internal field
-                    // (SigverifyTracerPacketStats).
-                    aggregated_tracer_packet_stats_option = Some(tracer_packet_stats.clone());
-                }
-            }
         }
 
         ReceivePacketResults {
             deserialized_packets,
-            new_tracer_stats_option: aggregated_tracer_packet_stats_option,
             packet_stats,
         }
     }
@@ -163,22 +144,20 @@ impl PacketDeserializer {
     ) -> Result<(usize, Vec<BankingPacketBatch>), RecvTimeoutError> {
         let start = Instant::now();
 
-        let message = self.packet_batch_receiver.recv_timeout(recv_timeout)?;
-        let packet_batches = &message.0;
+        let packet_batches = self.packet_batch_receiver.recv_timeout(recv_timeout)?;
         let mut num_packets_received = packet_batches
             .iter()
             .map(|batch| batch.len())
             .sum::<usize>();
-        let mut messages = vec![message];
+        let mut messages = vec![packet_batches];
 
-        while let Ok(message) = self.packet_batch_receiver.try_recv() {
-            let packet_batches = &message.0;
+        while let Ok(packet_batches) = self.packet_batch_receiver.try_recv() {
             trace!("got more packet batches in packet deserializer");
             num_packets_received += packet_batches
                 .iter()
                 .map(|batch| batch.len())
                 .sum::<usize>();
-            messages.push(message);
+            messages.push(packet_batches);
 
             if start.elapsed() >= recv_timeout || num_packets_received >= packet_count_upperbound {
                 break;
@@ -208,7 +187,7 @@ impl PacketDeserializer {
         packet_indexes.iter().filter_map(move |packet_index| {
             let packet_clone = packet_batch[*packet_index].clone();
 
-            match ImmutableDeserializedPacket::new(packet_clone)
+            match ImmutableDeserializedPacket::new(&packet_clone)
                 .and_then(|packet| packet_filter(packet).map_err(Into::into))
             {
                 Ok(packet) => Some(packet),
@@ -217,6 +196,19 @@ impl PacketDeserializer {
                     None
                 }
             }
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn deserialize_packets_with_indexes(
+        packet_batch: &PacketBatch,
+    ) -> impl Iterator<Item = (ImmutableDeserializedPacket, usize)> + '_ {
+        let packet_indexes = PacketDeserializer::generate_packet_indexes(packet_batch);
+        packet_indexes.into_iter().filter_map(move |packet_index| {
+            let packet = packet_batch[packet_index].clone();
+            ImmutableDeserializedPacket::new(&packet)
+                .ok()
+                .map(|packet| (packet, packet_index))
         })
     }
 }
@@ -240,7 +232,6 @@ mod tests {
     fn test_deserialize_and_collect_packets_empty() {
         let results = PacketDeserializer::deserialize_and_collect_packets(0, &[], Ok);
         assert_eq!(results.deserialized_packets.len(), 0);
-        assert!(results.new_tracer_stats_option.is_none());
         assert_eq!(results.packet_stats.passed_sigverify_count, 0);
         assert_eq!(results.packet_stats.failed_sigverify_count, 0);
     }
@@ -254,11 +245,10 @@ mod tests {
         let packet_count: usize = packet_batches.iter().map(|x| x.len()).sum();
         let results = PacketDeserializer::deserialize_and_collect_packets(
             packet_count,
-            &[BankingPacketBatch::new((packet_batches, None))],
+            &[BankingPacketBatch::new(packet_batches)],
             Ok,
         );
         assert_eq!(results.deserialized_packets.len(), 2);
-        assert!(results.new_tracer_stats_option.is_none());
         assert_eq!(results.packet_stats.passed_sigverify_count, 2);
         assert_eq!(results.packet_stats.failed_sigverify_count, 0);
     }
@@ -273,11 +263,10 @@ mod tests {
         let packet_count: usize = packet_batches.iter().map(|x| x.len()).sum();
         let results = PacketDeserializer::deserialize_and_collect_packets(
             packet_count,
-            &[BankingPacketBatch::new((packet_batches, None))],
+            &[BankingPacketBatch::new(packet_batches)],
             Ok,
         );
         assert_eq!(results.deserialized_packets.len(), 1);
-        assert!(results.new_tracer_stats_option.is_none());
         assert_eq!(results.packet_stats.passed_sigverify_count, 1);
         assert_eq!(results.packet_stats.failed_sigverify_count, 1);
     }

@@ -30,10 +30,6 @@ jobs:
         #
         test:
           - {
-              name: "solana-sdk",
-              commands: ["cargo +$rust_nightly bench -p solana-sdk"],
-            }
-          - {
               name: "solana-runtime",
               commands: ["cargo +$rust_nightly bench -p solana-runtime"],
             }

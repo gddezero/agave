@@ -1,5 +1,6 @@
 #![allow(clippy::arithmetic_side_effects)]
 use {
+    agave_feature_set::{FeatureSet, FEATURE_NAMES},
     base64::{prelude::BASE64_STANDARD, Engine},
     crossbeam_channel::Receiver,
     log::*,
@@ -13,9 +14,8 @@ use {
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         consensus::tower_storage::TowerStorage,
-        validator::{Validator, ValidatorConfig, ValidatorStartProgress},
+        validator::{Validator, ValidatorConfig, ValidatorStartProgress, ValidatorTpuConfig},
     },
-    solana_feature_set::FEATURE_NAMES,
     solana_geyser_plugin_manager::{
         geyser_plugin_manager::GeyserPluginManager, GeyserPluginManagerRequest,
     },
@@ -34,8 +34,10 @@ use {
     solana_rpc_client::{nonblocking, rpc_client::RpcClient},
     solana_rpc_client_api::request::MAX_MULTIPLE_ACCOUNTS,
     solana_runtime::{
-        bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
-        runtime_config::RuntimeConfig, snapshot_config::SnapshotConfig,
+        bank_forks::BankForks,
+        genesis_utils::{self, create_genesis_config_with_leader_ex_no_features},
+        runtime_config::RuntimeConfig,
+        snapshot_config::SnapshotConfig,
     },
     solana_sdk::{
         account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
@@ -53,9 +55,7 @@ use {
         signature::{read_keypair_file, write_keypair_file, Keypair, Signer},
     },
     solana_streamer::socket::SocketAddrSpace,
-    solana_tpu_client::tpu_client::{
-        DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_TPU_ENABLE_UDP, DEFAULT_TPU_USE_QUIC,
-    },
+    solana_tpu_client::tpu_client::DEFAULT_TPU_ENABLE_UDP,
     std::{
         collections::{HashMap, HashSet},
         ffi::OsStr,
@@ -786,8 +786,28 @@ impl TestValidator {
         let validator_stake_lamports = sol_to_lamports(1_000_000.);
         let mint_lamports = sol_to_lamports(500_000_000.);
 
+        // Only activate features which are not explicitly deactivated.
+        let mut feature_set = FeatureSet::default().inactive().clone();
+        for feature in &config.deactivate_feature_set {
+            if feature_set.remove(feature) {
+                info!("Feature for {:?} deactivated", feature)
+            } else {
+                warn!(
+                    "Feature {:?} set for deactivation is not a known Feature public key",
+                    feature,
+                )
+            }
+        }
+
         let mut accounts = config.accounts.clone();
         for (address, account) in solana_program_test::programs::spl_programs(&config.rent) {
+            accounts.entry(address).or_insert(account);
+        }
+        for (address, account) in
+            solana_program_test::programs::core_bpf_programs(&config.rent, |feature_id| {
+                feature_set.contains(feature_id)
+            })
+        {
             accounts.entry(address).or_insert(account);
         }
         for upgradeable_program in &config.upgradeable_programs {
@@ -829,7 +849,7 @@ impl TestValidator {
             );
         }
 
-        let mut genesis_config = create_genesis_config_with_leader_ex(
+        let mut genesis_config = create_genesis_config_with_leader_ex_no_features(
             mint_lamports,
             &mint_address,
             &validator_identity.pubkey(),
@@ -852,22 +872,8 @@ impl TestValidator {
             genesis_config.ticks_per_slot = ticks_per_slot;
         }
 
-        // Remove features tagged to deactivate
-        for deactivate_feature_pk in &config.deactivate_feature_set {
-            if FEATURE_NAMES.contains_key(deactivate_feature_pk) {
-                match genesis_config.accounts.remove(deactivate_feature_pk) {
-                    Some(_) => info!("Feature for {:?} deactivated", deactivate_feature_pk),
-                    None => warn!(
-                        "Feature {:?} set for deactivation not found in genesis_config account list, ignored.",
-                        deactivate_feature_pk
-                    ),
-                }
-            } else {
-                warn!(
-                    "Feature {:?} set for deactivation is not a known Feature public key",
-                    deactivate_feature_pk
-                );
-            }
+        for feature in feature_set {
+            genesis_utils::activate_feature(&mut genesis_config, feature);
         }
 
         let ledger_path = match &config.ledger_path {
@@ -971,10 +977,7 @@ impl TestValidator {
         }
 
         let accounts_db_config = Some(AccountsDbConfig {
-            index: Some(AccountsIndexConfig {
-                started_from_validator: true,
-                ..AccountsIndexConfig::default()
-            }),
+            index: Some(AccountsIndexConfig::default()),
             account_indexes: Some(config.rpc_config.account_indexes.clone()),
             ..AccountsDbConfig::default()
         });
@@ -1004,7 +1007,6 @@ impl TestValidator {
             )),
             rpc_config: config.rpc_config.clone(),
             pubsub_config: config.pubsub_config.clone(),
-            accounts_hash_interval_slots: 100,
             account_paths: vec![
                 create_accounts_run_and_snapshot_dirs(ledger_path.join("accounts"))
                     .unwrap()
@@ -1019,7 +1021,6 @@ impl TestValidator {
                 incremental_snapshot_archives_dir: ledger_path.to_path_buf(),
                 ..SnapshotConfig::default()
             },
-            enforce_ulimit_nofile: false,
             warp_slot: config.warp_slot,
             validator_exit: config.validator_exit.clone(),
             max_ledger_shreds: config.max_ledger_shreds,
@@ -1045,10 +1046,7 @@ impl TestValidator {
             rpc_to_plugin_manager_receiver,
             config.start_progress.clone(),
             socket_addr_space,
-            DEFAULT_TPU_USE_QUIC,
-            DEFAULT_TPU_CONNECTION_POOL_SIZE,
-            config.tpu_enable_udp,
-            32, // max connections per IpAddr per minute for test
+            ValidatorTpuConfig::new_for_tests(config.tpu_enable_udp),
             config.admin_rpc_service_post_init.clone(),
         )?);
 
@@ -1194,7 +1192,7 @@ impl Drop for TestValidator {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use {super::*, solana_sdk::feature::Feature};
 
     #[test]
     fn get_health() {
@@ -1217,5 +1215,124 @@ mod test {
     async fn document_tokio_panic() {
         // `start()` blows up when run within tokio
         let (_test_validator, _payer) = TestValidatorGenesis::default().start();
+    }
+
+    #[tokio::test]
+    async fn test_deactivate_features() {
+        let mut control = FeatureSet::default().inactive().clone();
+        let mut deactivate_features = Vec::new();
+        [
+            solana_sdk::feature_set::deprecate_rewards_sysvar::id(),
+            solana_sdk::feature_set::disable_fees_sysvar::id(),
+        ]
+        .into_iter()
+        .for_each(|feature| {
+            control.remove(&feature);
+            deactivate_features.push(feature);
+        });
+
+        // Convert to `Vec` so we can get a slice.
+        let control: Vec<Pubkey> = control.into_iter().collect();
+
+        let (test_validator, _payer) = TestValidatorGenesis::default()
+            .deactivate_features(&deactivate_features)
+            .start_async()
+            .await;
+
+        let rpc_client = test_validator.get_async_rpc_client();
+
+        // Our deactivated features should be inactive.
+        let inactive_feature_accounts = rpc_client
+            .get_multiple_accounts(&deactivate_features)
+            .await
+            .unwrap();
+        for f in inactive_feature_accounts {
+            assert!(f.is_none());
+        }
+
+        // Everything else should be active.
+        for chunk in control.chunks(100) {
+            let active_feature_accounts = rpc_client.get_multiple_accounts(chunk).await.unwrap();
+            for f in active_feature_accounts {
+                let account = f.unwrap(); // Should be `Some`.
+                let feature_state: Feature = bincode::deserialize(account.data()).unwrap();
+                assert!(feature_state.activated_at.is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_override_feature_account() {
+        let with_deactivate_flag = solana_sdk::feature_set::deprecate_rewards_sysvar::id();
+        let without_deactivate_flag = solana_sdk::feature_set::disable_fees_sysvar::id();
+
+        let owner = Pubkey::new_unique();
+        let account = || AccountSharedData::new(100_000, 0, &owner);
+
+        let (test_validator, _payer) = TestValidatorGenesis::default()
+            .deactivate_features(&[with_deactivate_flag]) // Just deactivate one feature.
+            .add_accounts([
+                (with_deactivate_flag, account()), // But add both accounts.
+                (without_deactivate_flag, account()),
+            ])
+            .start_async()
+            .await;
+
+        let rpc_client = test_validator.get_async_rpc_client();
+
+        let our_accounts = rpc_client
+            .get_multiple_accounts(&[with_deactivate_flag, without_deactivate_flag])
+            .await
+            .unwrap();
+
+        // The first one, where we provided `--deactivate-feature`, should be
+        // the account we provided.
+        let overriden_account = our_accounts[0].as_ref().unwrap();
+        assert_eq!(overriden_account.lamports, 100_000);
+        assert_eq!(overriden_account.data.len(), 0);
+        assert_eq!(overriden_account.owner, owner);
+
+        // The second one should be a feature account.
+        let feature_account = our_accounts[1].as_ref().unwrap();
+        assert_eq!(feature_account.owner, solana_sdk::feature::id());
+        let feature_state: Feature = bincode::deserialize(feature_account.data()).unwrap();
+        assert!(feature_state.activated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_core_bpf_programs() {
+        let (test_validator, _payer) = TestValidatorGenesis::default()
+            .deactivate_features(&[
+                // Don't migrate the lookup table program.
+                solana_sdk::feature_set::migrate_address_lookup_table_program_to_core_bpf::id(),
+            ])
+            .start_async()
+            .await;
+
+        let rpc_client = test_validator.get_async_rpc_client();
+
+        let fetched_programs = rpc_client
+            .get_multiple_accounts(&[
+                solana_sdk_ids::address_lookup_table::id(),
+                solana_sdk_ids::config::id(),
+                solana_sdk_ids::feature::id(),
+            ])
+            .await
+            .unwrap();
+
+        // Address lookup table is builtin.
+        let account = fetched_programs[0].as_ref().unwrap();
+        assert_eq!(account.owner, solana_sdk_ids::native_loader::id());
+        assert!(account.executable);
+
+        // Config is a a BPF program.
+        let account = fetched_programs[1].as_ref().unwrap();
+        assert_eq!(account.owner, solana_sdk_ids::bpf_loader_upgradeable::id());
+        assert!(account.executable);
+
+        // Feature Gate is a BPF program.
+        let account = fetched_programs[2].as_ref().unwrap();
+        assert_eq!(account.owner, solana_sdk_ids::bpf_loader_upgradeable::id());
+        assert!(account.executable);
     }
 }

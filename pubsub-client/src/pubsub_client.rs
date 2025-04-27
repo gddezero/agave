@@ -46,10 +46,10 @@
 //!
 //! ```
 //! use anyhow::Result;
-//! use solana_sdk::commitment_config::CommitmentConfig;
+//! use solana_commitment_config::CommitmentConfig;
+//! use solana_pubkey::Pubkey;
 //! use solana_pubsub_client::pubsub_client::PubsubClient;
 //! use solana_rpc_client_api::config::RpcAccountInfoConfig;
-//! use solana_sdk::pubkey::Pubkey;
 //! use std::thread;
 //!
 //! fn get_account_updates(account_pubkey: Pubkey) -> Result<()> {
@@ -82,7 +82,7 @@
 //!     Ok(())
 //! }
 //! #
-//! # get_account_updates(solana_sdk::pubkey::new_rand());
+//! # get_account_updates(solana_pubkey::new_rand());
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
@@ -96,7 +96,9 @@ use {
         value::Value::{Number, Object},
         Map, Value,
     },
-    solana_account_decoder::UiAccount,
+    solana_account_decoder_client_types::UiAccount,
+    solana_clock::Slot,
+    solana_pubkey::Pubkey,
     solana_rpc_client_api::{
         config::{
             RpcAccountInfoConfig, RpcBlockSubscribeConfig, RpcBlockSubscribeFilter,
@@ -108,7 +110,7 @@ use {
             RpcSignatureResult, RpcVote, SlotInfo, SlotUpdate,
         },
     },
-    solana_sdk::{clock::Slot, pubkey::Pubkey, signature::Signature},
+    solana_signature::Signature,
     std::{
         marker::PhantomData,
         net::TcpStream,
@@ -303,10 +305,9 @@ fn connect_with_retry(
     loop {
         let result = connect(url.clone()).map(|(socket, _)| socket);
         if let Err(tungstenite::Error::Http(response)) = &result {
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && connection_retries > 0
-            {
+            if response.status() == http::StatusCode::TOO_MANY_REQUESTS && connection_retries > 0 {
                 let mut duration = Duration::from_millis(500);
-                if let Some(retry_after) = response.headers().get(reqwest::header::RETRY_AFTER) {
+                if let Some(retry_after) = response.headers().get(http::header::RETRY_AFTER) {
                     if let Ok(retry_after) = retry_after.to_str() {
                         if let Ok(retry_after) = retry_after.parse::<u64>() {
                             if retry_after < 120 {

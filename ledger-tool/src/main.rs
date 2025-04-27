@@ -7,11 +7,13 @@ use {
         ledger_path::*,
         ledger_utils::*,
         output::{
-            output_account, AccountsOutputConfig, AccountsOutputMode, AccountsOutputStreamer,
+            AccountsOutputConfig, AccountsOutputMode, AccountsOutputStreamer, CliAccounts,
             SlotBankHash,
         },
         program::*,
     },
+    agave_feature_set::{self as feature_set, FeatureSet},
+    agave_reserved_account_keys::ReservedAccountKeys,
     clap::{
         crate_description, crate_name, value_t, value_t_or_exit, values_t_or_exit, App,
         AppSettings, Arg, ArgMatches, SubCommand,
@@ -19,8 +21,11 @@ use {
     dashmap::DashMap,
     log::*,
     serde_derive::Serialize,
-    solana_account_decoder::UiAccountEncoding,
-    solana_accounts_db::{accounts_db::CalcAccountsHashDataSource, accounts_index::ScanConfig},
+    solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig},
+    solana_accounts_db::{
+        accounts_db::CalcAccountsHashDataSource,
+        accounts_index::{ScanConfig, ScanOrder},
+    },
     solana_clap_utils::{
         hidden_unless_forced,
         input_parsers::{cluster_type_of, pubkey_of, pubkeys_of},
@@ -29,14 +34,13 @@ use {
             is_within_range,
         },
     },
-    solana_cli_output::OutputFormat,
+    solana_cli_output::{CliAccount, CliAccountNewConfig, OutputFormat},
     solana_core::{
         banking_simulation::{BankingSimulator, BankingTraceEvents},
         system_monitor_service::{SystemMonitorService, SystemMonitorStatsReportConfig},
-        validator::{BlockProductionMethod, BlockVerificationMethod},
+        validator::{BlockProductionMethod, BlockVerificationMethod, TransactionStructure},
     },
     solana_cost_model::{cost_model::CostModel, cost_tracker::CostTracker},
-    solana_feature_set::{self as feature_set, FeatureSet},
     solana_ledger::{
         blockstore::{banking_trace_path, create_new_ledger, Blockstore},
         blockstore_options::{AccessType, LedgerColumnOptions},
@@ -51,6 +55,7 @@ use {
             Bank, RewardCalculationEvent,
         },
         bank_forks::BankForks,
+        inflation_rewards::points::{InflationPointCalculationEvent, PointValue},
         snapshot_archive_info::SnapshotArchiveInfoGetter,
         snapshot_bank_utils,
         snapshot_minimizer::SnapshotMinimizer,
@@ -59,6 +64,7 @@ use {
             SUPPORTED_ARCHIVE_COMPRESSION,
         },
     },
+    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount},
         account_utils::StateMut,
@@ -69,15 +75,15 @@ use {
         native_token::{lamports_to_sol, sol_to_lamports, Sol},
         pubkey::Pubkey,
         rent::Rent,
-        reserved_account_keys::ReservedAccountKeys,
         shred_version::compute_shred_version,
         stake::{self, state::StakeStateV2},
         system_program,
-        transaction::{MessageHash, SanitizedTransaction, SimpleAddressLoader},
+        transaction::{MessageHash, SimpleAddressLoader},
     },
-    solana_stake_program::{points::PointValue, stake_state},
+    solana_stake_program::stake_state,
     solana_transaction_status::parse_ui_instruction,
     solana_unified_scheduler_pool::DefaultSchedulerPool,
+    solana_vote::vote_state_view::VoteStateView,
     solana_vote_program::{
         self,
         vote_state::{self, VoteState},
@@ -216,16 +222,16 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
             .map(|(_, (stake, _))| stake)
             .sum();
         for (stake, vote_account) in bank.vote_accounts().values() {
-            let vote_state = vote_account.vote_state();
-            if let Some(last_vote) = vote_state.votes.iter().last() {
-                let entry = last_votes.entry(vote_state.node_pubkey).or_insert((
-                    last_vote.slot(),
-                    vote_state.clone(),
+            let vote_state_view = vote_account.vote_state_view();
+            if let Some(last_vote) = vote_state_view.last_voted_slot() {
+                let entry = last_votes.entry(*vote_state_view.node_pubkey()).or_insert((
+                    last_vote,
+                    vote_state_view.clone(),
                     *stake,
                     total_stake,
                 ));
-                if entry.0 < last_vote.slot() {
-                    *entry = (last_vote.slot(), vote_state.clone(), *stake, total_stake);
+                if entry.0 < last_vote {
+                    *entry = (last_vote, vote_state_view.clone(), *stake, total_stake);
                 }
             }
         }
@@ -249,19 +255,20 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
     dot.push("  subgraph cluster_banks {".to_string());
     dot.push("    style=invis".to_string());
     let mut styled_slots = HashSet::new();
-    let mut all_votes: HashMap<Pubkey, HashMap<Slot, VoteState>> = HashMap::new();
+    let mut all_votes: HashMap<Pubkey, HashMap<Slot, VoteStateView>> = HashMap::new();
     for fork_slot in &fork_slots {
         let mut bank = bank_forks[*fork_slot].clone();
 
         let mut first = true;
         loop {
             for (_, vote_account) in bank.vote_accounts().values() {
-                let vote_state = vote_account.vote_state();
-                if let Some(last_vote) = vote_state.votes.iter().last() {
-                    let validator_votes = all_votes.entry(vote_state.node_pubkey).or_default();
+                let vote_state_view = vote_account.vote_state_view();
+                if let Some(last_vote) = vote_state_view.last_voted_slot() {
+                    let validator_votes =
+                        all_votes.entry(*vote_state_view.node_pubkey()).or_default();
                     validator_votes
-                        .entry(last_vote.slot())
-                        .or_insert_with(|| vote_state.clone());
+                        .entry(last_vote)
+                        .or_insert_with(|| vote_state_view.clone());
                 }
             }
 
@@ -339,7 +346,7 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
     let mut absent_votes = 0;
     let mut lowest_last_vote_slot = u64::MAX;
     let mut lowest_total_stake = 0;
-    for (node_pubkey, (last_vote_slot, vote_state, stake, total_stake)) in &last_votes {
+    for (node_pubkey, (last_vote_slot, vote_state_view, stake, total_stake)) in &last_votes {
         all_votes.entry(*node_pubkey).and_modify(|validator_votes| {
             validator_votes.remove(last_vote_slot);
         });
@@ -359,9 +366,8 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
                 if matches!(config.vote_account_mode, GraphVoteAccountMode::WithHistory) {
                     format!(
                         "vote history:\n{}",
-                        vote_state
-                            .votes
-                            .iter()
+                        vote_state_view
+                            .votes_iter()
                             .map(|vote| format!(
                                 "slot {} (conf={})",
                                 vote.slot(),
@@ -373,10 +379,9 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
                 } else {
                     format!(
                         "last vote slot: {}",
-                        vote_state
-                            .votes
-                            .back()
-                            .map(|vote| vote.slot().to_string())
+                        vote_state_view
+                            .last_voted_slot()
+                            .map(|vote_slot| vote_slot.to_string())
                             .unwrap_or_else(|| "none".to_string())
                     )
                 };
@@ -385,7 +390,7 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
                 node_pubkey,
                 node_pubkey,
                 lamports_to_sol(*stake),
-                vote_state.root_slot.unwrap_or(0),
+                vote_state_view.root_slot().unwrap_or(0),
                 vote_history,
             ));
 
@@ -414,16 +419,15 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
     // Add for vote information from all banks.
     if config.include_all_votes {
         for (node_pubkey, validator_votes) in &all_votes {
-            for (vote_slot, vote_state) in validator_votes {
+            for (vote_slot, vote_state_view) in validator_votes {
                 dot.push(format!(
                     r#"  "{} vote {}"[shape=box,style=dotted,label="validator vote: {}\nroot slot: {}\nvote history:\n{}"];"#,
                     node_pubkey,
                     vote_slot,
                     node_pubkey,
-                    vote_state.root_slot.unwrap_or(0),
-                    vote_state
-                        .votes
-                        .iter()
+                    vote_state_view.root_slot().unwrap_or(0),
+                    vote_state_view
+                        .votes_iter()
                         .map(|vote| format!("slot {} (conf={})", vote.slot(), vote.confirmation_count()))
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -472,7 +476,7 @@ fn compute_slot_cost(
             .transactions
             .into_iter()
             .filter_map(|transaction| {
-                SanitizedTransaction::try_create(
+                RuntimeTransaction::try_create(
                     transaction,
                     MessageHash::Compute,
                     None,
@@ -795,10 +799,10 @@ fn record_transactions(
     }
 }
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
 use jemallocator::Jemalloc;
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -1136,29 +1140,6 @@ fn main() {
                         ),
                 )
                 .arg(
-                    Arg::with_name("partitioned_epoch_rewards_compare_calculation")
-                        .long("partitioned-epoch-rewards-compare-calculation")
-                        .takes_value(false)
-                        .help(
-                            "Do normal epoch rewards distribution, but also calculate rewards \
-                             using the partitioned rewards code path and compare the resulting \
-                             vote and stake accounts",
-                        )
-                        .hidden(hidden_unless_forced()),
-                )
-                .arg(
-                    Arg::with_name("partitioned_epoch_rewards_force_enable_single_slot")
-                        .long("partitioned-epoch-rewards-force-enable-single-slot")
-                        .takes_value(false)
-                        .help(
-                            "Force the partitioned rewards distribution, but distribute all \
-                             rewards in the first slot in the epoch. This should match consensus \
-                             with the normal rewards distribution.",
-                        )
-                        .conflicts_with("partitioned_epoch_rewards_compare_calculation")
-                        .hidden(hidden_unless_forced()),
-                )
-                .arg(
                     Arg::with_name("print_accounts_stats")
                         .long("print-accounts-stats")
                         .takes_value(false)
@@ -1471,6 +1452,20 @@ fn main() {
                         .conflicts_with("no_snapshot"),
                 )
                 .arg(
+                    Arg::with_name("snapshot_zstd_compression_level")
+                        .long("snapshot-zstd-compression-level")
+                        .default_value("0")
+                        .value_name("LEVEL")
+                        .takes_value(true)
+                        .help("The compression level to use when archiving with zstd")
+                        .long_help(
+                            "The compression level to use when archiving with zstd. \
+                             Higher compression levels generally produce higher \
+                             compression ratio at the expense of speed and memory. \
+                             See the zstd manpage for more information."
+                        ),
+                )
+                .arg(
                     Arg::with_name("enable_capitalization_change")
                         .long("enable-capitalization-change")
                         .takes_value(false)
@@ -1676,20 +1671,46 @@ fn main() {
 
             match matches.subcommand() {
                 ("genesis", Some(arg_matches)) => {
+                    let output_format =
+                        OutputFormat::from_matches(arg_matches, "output_format", false);
+                    let output_accounts = arg_matches.is_present("accounts");
+
                     let genesis_config = open_genesis_config_by(&ledger_path, arg_matches);
-                    let print_accounts = arg_matches.is_present("accounts");
-                    if print_accounts {
-                        let print_account_data = !arg_matches.is_present("no_account_data");
-                        let print_encoding_format = parse_encoding_format(arg_matches);
-                        for (pubkey, account) in genesis_config.accounts {
-                            output_account(
-                                &pubkey,
-                                &AccountSharedData::from(account),
-                                None,
-                                print_account_data,
-                                print_encoding_format,
-                            );
-                        }
+
+                    if output_accounts {
+                        let data_encoding = parse_encoding_format(arg_matches);
+                        let output_account_data = !arg_matches.is_present("no_account_data");
+                        let data_slice_config = if output_account_data {
+                            // None yields the entire account in the slice
+                            None
+                        } else {
+                            // usize::MAX is a sentinel that will yield an
+                            // empty data slice. Because of this, length is
+                            // ignored so any value will do
+                            let offset = usize::MAX;
+                            let length = 0;
+                            Some(UiDataSliceConfig { offset, length })
+                        };
+                        let cli_account_config = CliAccountNewConfig {
+                            data_encoding,
+                            data_slice_config,
+                            ..CliAccountNewConfig::default()
+                        };
+
+                        let accounts: Vec<_> = genesis_config
+                            .accounts
+                            .into_iter()
+                            .map(|(pubkey, account)| {
+                                CliAccount::new_with_config(
+                                    &pubkey,
+                                    &AccountSharedData::from(account),
+                                    &cli_account_config,
+                                )
+                            })
+                            .collect();
+                        let accounts = CliAccounts { accounts };
+
+                        println!("{}", output_format.formatted_string(&accounts));
                     } else {
                         println!("{genesis_config}");
                     }
@@ -1992,9 +2013,18 @@ fn main() {
                     let snapshot_archive_format = {
                         let archive_format_str =
                             value_t_or_exit!(arg_matches, "snapshot_archive_format", String);
-                        ArchiveFormat::from_cli_arg(&archive_format_str).unwrap_or_else(|| {
-                            panic!("Archive format not recognized: {archive_format_str}")
-                        })
+                        let mut archive_format = ArchiveFormat::from_cli_arg(&archive_format_str)
+                            .unwrap_or_else(|| {
+                                panic!("Archive format not recognized: {archive_format_str}")
+                            });
+                        if let ArchiveFormat::TarZstd { config } = &mut archive_format {
+                            config.compression_level = value_t_or_exit!(
+                                arg_matches,
+                                "snapshot_zstd_compression_level",
+                                i32
+                            );
+                        }
+                        archive_format
                     };
 
                     let genesis_config = open_genesis_config_by(&ledger_path, arg_matches);
@@ -2100,7 +2130,7 @@ fn main() {
                         .accounts
                         .accounts_db
                         .verify_accounts_hash_in_bg
-                        .wait_for_complete();
+                        .join_background_thread();
 
                     let child_bank_required = rent_burn_percentage.is_ok()
                         || hashes_per_tick.is_some()
@@ -2171,7 +2201,10 @@ fn main() {
 
                     if remove_stake_accounts {
                         for (address, mut account) in bank
-                            .get_program_accounts(&stake::program::id(), &ScanConfig::new(false))
+                            .get_program_accounts(
+                                &stake::program::id(),
+                                &ScanConfig::new(ScanOrder::Sorted),
+                            )
                             .unwrap()
                             .into_iter()
                         {
@@ -2195,7 +2228,10 @@ fn main() {
 
                     if !vote_accounts_to_destake.is_empty() {
                         for (address, mut account) in bank
-                            .get_program_accounts(&stake::program::id(), &ScanConfig::new(false))
+                            .get_program_accounts(
+                                &stake::program::id(),
+                                &ScanConfig::new(ScanOrder::Sorted),
+                            )
                             .unwrap()
                             .into_iter()
                         {
@@ -2235,7 +2271,7 @@ fn main() {
                         for (address, mut account) in bank
                             .get_program_accounts(
                                 &solana_vote_program::id(),
-                                &ScanConfig::new(false),
+                                &ScanConfig::new(ScanOrder::Sorted),
                             )
                             .unwrap()
                             .into_iter()
@@ -2518,14 +2554,18 @@ fn main() {
                         BlockProductionMethod
                     )
                     .unwrap_or_default();
+                    let transaction_struct =
+                        value_t!(arg_matches, "transaction_struct", TransactionStructure)
+                            .unwrap_or_default();
 
-                    info!("Using: block-production-method: {block_production_method}");
+                    info!("Using: block-production-method: {block_production_method} transaction-structure: {transaction_struct}");
 
                     match simulator.start(
                         genesis_config,
                         bank_forks,
                         blockstore,
                         block_production_method,
+                        transaction_struct,
                     ) {
                         Ok(()) => println!("Ok"),
                         Err(error) => {
@@ -2746,7 +2786,6 @@ fn main() {
                             new_credits_observed: Option<u64>,
                             skipped_reasons: String,
                         }
-                        use solana_stake_program::points::InflationPointCalculationEvent;
                         let stake_calculation_details: DashMap<Pubkey, CalculationDetail> =
                             DashMap::new();
                         let last_point_value = Arc::new(RwLock::new(None));

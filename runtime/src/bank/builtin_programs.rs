@@ -2,7 +2,7 @@
 mod tests {
     use {
         crate::bank::*,
-        solana_feature_set::FeatureSet,
+        agave_feature_set::FeatureSet,
         solana_sdk::{ed25519_program, genesis_config::create_genesis_config},
     };
 
@@ -37,7 +37,7 @@ mod tests {
         let only_apply_transitions_for_new_features = true;
         bank.apply_builtin_program_feature_transitions(
             only_apply_transitions_for_new_features,
-            &HashSet::new(),
+            &AHashSet::new(),
         );
     }
 
@@ -66,15 +66,17 @@ mod tests {
 mod tests_core_bpf_migration {
     use {
         crate::bank::{
-            builtins::{
-                core_bpf_migration::{tests::TestContext, CoreBpfMigrationConfig},
-                BuiltinPrototype, StatelessBuiltinPrototype, BUILTINS, STATELESS_BUILTINS,
-            },
+            builtins::core_bpf_migration::tests::TestContext,
             test_utils::goto_end_of_slot,
             tests::{create_genesis_config, new_bank_from_parent_with_bank_forks},
             Bank,
         },
-        solana_feature_set::FeatureSet,
+        agave_feature_set::FeatureSet,
+        solana_builtins::{
+            core_bpf_migration::CoreBpfMigrationConfig,
+            prototype::{BuiltinPrototype, StatelessBuiltinPrototype},
+            BUILTINS,
+        },
         solana_program_runtime::loaded_programs::ProgramCacheEntry,
         solana_sdk::{
             account::{AccountSharedData, ReadableAccount, WritableAccount},
@@ -125,6 +127,8 @@ mod tests_core_bpf_migration {
 
     enum TestPrototype<'a> {
         Builtin(&'a BuiltinPrototype),
+        #[allow(unused)]
+        // We aren't migrating any stateless builtins right now. Uncomment if needed.
         Stateless(&'a StatelessBuiltinPrototype),
     }
     impl<'a> TestPrototype<'a> {
@@ -151,11 +155,9 @@ mod tests_core_bpf_migration {
     #[test_case(TestPrototype::Builtin(&BUILTINS[0]); "system")]
     #[test_case(TestPrototype::Builtin(&BUILTINS[1]); "vote")]
     #[test_case(TestPrototype::Builtin(&BUILTINS[2]); "stake")]
-    #[test_case(TestPrototype::Builtin(&BUILTINS[3]); "config")]
-    #[test_case(TestPrototype::Builtin(&BUILTINS[4]); "bpf_loader_deprecated")]
-    #[test_case(TestPrototype::Builtin(&BUILTINS[5]); "bpf_loader")]
-    #[test_case(TestPrototype::Builtin(&BUILTINS[8]); "address_lookup_table")]
-    #[test_case(TestPrototype::Stateless(&STATELESS_BUILTINS[0]); "feature_gate")]
+    #[test_case(TestPrototype::Builtin(&BUILTINS[3]); "bpf_loader_deprecated")]
+    #[test_case(TestPrototype::Builtin(&BUILTINS[4]); "bpf_loader")]
+    #[test_case(TestPrototype::Builtin(&BUILTINS[7]); "address_lookup_table")]
     fn test_core_bpf_migration(prototype: TestPrototype) {
         let (mut genesis_config, mint_keypair) =
             create_genesis_config(1_000_000 * LAMPORTS_PER_SOL);
@@ -322,7 +324,7 @@ mod tests_core_bpf_migration {
 
         // Add the feature to the bank's inactive feature set.
         let mut feature_set = FeatureSet::all_enabled();
-        feature_set.inactive.insert(*feature_id);
+        feature_set.inactive_mut().insert(*feature_id);
         root_bank.feature_set = Arc::new(feature_set);
 
         // Initialize the source buffer account.
@@ -405,7 +407,7 @@ mod tests_core_bpf_migration {
 
         // Set up the feature set with the migration feature marked as active.
         let mut feature_set = FeatureSet::all_enabled();
-        feature_set.active.insert(*feature_id, 0);
+        feature_set.active_mut().insert(*feature_id, 0);
         bank.feature_set = Arc::new(feature_set);
         bank.store_account_and_update_capitalization(
             feature_id,
@@ -574,7 +576,7 @@ mod tests_core_bpf_migration {
         // Now, add the feature ID as active, and run `finish_init` again to
         // make sure the feature is idempotent.
         let mut feature_set = FeatureSet::all_enabled();
-        feature_set.active.insert(*feature_id, 0);
+        feature_set.active_mut().insert(*feature_id, 0);
         bank.feature_set = Arc::new(feature_set);
         bank.store_account_and_update_capitalization(
             feature_id,

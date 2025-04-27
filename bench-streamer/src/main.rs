@@ -3,13 +3,14 @@
 use {
     clap::{crate_description, crate_name, Arg, Command},
     crossbeam_channel::unbounded,
+    solana_net_utils::{bind_to_unspecified, SocketConfig},
     solana_streamer::{
         packet::{Packet, PacketBatch, PacketBatchRecycler, PACKET_DATA_SIZE},
         streamer::{receiver, PacketBatchReceiver, StreamerReceiveStats},
     },
     std::{
         cmp::max,
-        net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+        net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
@@ -20,7 +21,7 @@ use {
 };
 
 fn producer(addr: &SocketAddr, exit: Arc<AtomicBool>) -> JoinHandle<()> {
-    let send = UdpSocket::bind("0.0.0.0:0").unwrap();
+    let send = bind_to_unspecified().unwrap();
     let batch_size = 10;
     let mut packet_batch = PacketBatch::with_capacity(batch_size);
     packet_batch.resize(batch_size, Packet::default());
@@ -83,7 +84,7 @@ fn main() -> Result<()> {
         num_sockets = max(num_sockets, n.to_string().parse().expect("integer"));
     }
 
-    let num_producers: u64 = matches.value_of_t("num_producers").unwrap_or(4);
+    let num_producers: u64 = matches.value_of_t("num-producers").unwrap_or(4);
 
     let port = 0;
     let ip_addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -94,9 +95,10 @@ fn main() -> Result<()> {
     let mut read_channels = Vec::new();
     let mut read_threads = Vec::new();
     let recycler = PacketBatchRecycler::default();
-    let (_port, read_sockets) = solana_net_utils::multi_bind_in_range(
+    let (_port, read_sockets) = solana_net_utils::multi_bind_in_range_with_config(
         ip_addr,
         (port, port + num_sockets as u16),
+        SocketConfig::default().reuseport(true),
         num_sockets,
     )
     .unwrap();
@@ -114,7 +116,7 @@ fn main() -> Result<()> {
             s_reader,
             recycler.clone(),
             stats.clone(),
-            Duration::from_millis(1), // coalesce
+            Some(Duration::from_millis(1)), // coalesce
             true,
             None,
             false,

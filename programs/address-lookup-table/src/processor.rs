@@ -1,22 +1,19 @@
 use {
-    solana_feature_set as feature_set,
+    solana_address_lookup_table_interface::{
+        instruction::ProgramInstruction,
+        program::{check_id, id},
+        state::{
+            AddressLookupTable, LookupTableMeta, LookupTableStatus, ProgramState,
+            LOOKUP_TABLE_MAX_ADDRESSES, LOOKUP_TABLE_META_SIZE,
+        },
+    },
+    solana_bincode::limited_deserialize,
+    solana_clock::Slot,
+    solana_instruction::error::InstructionError,
     solana_log_collector::ic_msg,
     solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
-    solana_sdk::{
-        address_lookup_table::{
-            instruction::ProgramInstruction,
-            program::{check_id, id},
-            state::{
-                AddressLookupTable, LookupTableMeta, LookupTableStatus, ProgramState,
-                LOOKUP_TABLE_MAX_ADDRESSES, LOOKUP_TABLE_META_SIZE,
-            },
-        },
-        clock::Slot,
-        instruction::InstructionError,
-        program_utils::limited_deserialize,
-        pubkey::{Pubkey, PUBKEY_BYTES},
-        system_instruction,
-    },
+    solana_pubkey::{Pubkey, PUBKEY_BYTES},
+    solana_system_interface::instruction as system_instruction,
     std::convert::TryFrom,
 };
 
@@ -26,7 +23,7 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
     let transaction_context = &invoke_context.transaction_context;
     let instruction_context = transaction_context.get_current_instruction_context()?;
     let instruction_data = instruction_context.get_instruction_data();
-    match limited_deserialize(instruction_data)? {
+    match limited_deserialize(instruction_data, solana_packet::PACKET_DATA_SIZE as u64)? {
         ProgramInstruction::CreateLookupTable {
             recent_slot,
             bump_seed,
@@ -61,27 +58,11 @@ impl Processor {
         let lookup_table_lamports = lookup_table_account.get_lamports();
         let table_key = *lookup_table_account.get_key();
         let lookup_table_owner = *lookup_table_account.get_owner();
-        if !invoke_context
-            .get_feature_set()
-            .is_active(&feature_set::relax_authority_signer_check_for_lookup_table_creation::id())
-            && !lookup_table_account.get_data().is_empty()
-        {
-            ic_msg!(invoke_context, "Table account must not be allocated");
-            return Err(InstructionError::AccountAlreadyInitialized);
-        }
         drop(lookup_table_account);
 
         let authority_account =
             instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
         let authority_key = *authority_account.get_key();
-        if !invoke_context
-            .get_feature_set()
-            .is_active(&feature_set::relax_authority_signer_check_for_lookup_table_creation::id())
-            && !authority_account.is_signer()
-        {
-            ic_msg!(invoke_context, "Authority account must be a signer");
-            return Err(InstructionError::MissingRequiredSignature);
-        }
         drop(authority_account);
 
         let payer_account =
@@ -127,11 +108,7 @@ impl Processor {
             return Err(InstructionError::InvalidArgument);
         }
 
-        if invoke_context
-            .get_feature_set()
-            .is_active(&feature_set::relax_authority_signer_check_for_lookup_table_creation::id())
-            && check_id(&lookup_table_owner)
-        {
+        if check_id(&lookup_table_owner) {
             return Ok(());
         }
 

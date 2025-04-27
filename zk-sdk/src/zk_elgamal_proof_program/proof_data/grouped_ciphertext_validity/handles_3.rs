@@ -5,13 +5,17 @@
 //! decryption handles. To generate the proof, a prover must provide the Pedersen opening
 //! associated with the grouped ciphertext's commitment.
 
+#[cfg(target_arch = "wasm32")]
+use {
+    crate::encryption::grouped_elgamal::GroupedElGamalCiphertext3Handles, wasm_bindgen::prelude::*,
+};
 use {
     crate::{
         encryption::pod::{
             elgamal::PodElGamalPubkey, grouped_elgamal::PodGroupedElGamalCiphertext3Handles,
         },
         sigma_proofs::pod::PodGroupedCiphertext3HandlesValidityProof,
-        zk_elgamal_proof_program::proof_data::{ProofType, ZkProofData},
+        zk_elgamal_proof_program::proof_data::{pod::impl_wasm_to_bytes, ProofType, ZkProofData},
     },
     bytemuck_derive::{Pod, Zeroable},
 };
@@ -23,7 +27,10 @@ use {
             pedersen::PedersenOpening,
         },
         sigma_proofs::grouped_ciphertext_validity::GroupedCiphertext3HandlesValidityProof,
-        zk_elgamal_proof_program::errors::{ProofGenerationError, ProofVerificationError},
+        zk_elgamal_proof_program::{
+            errors::{ProofGenerationError, ProofVerificationError},
+            proof_data::errors::ProofDataError,
+        },
     },
     bytemuck::bytes_of,
     merlin::Transcript,
@@ -34,6 +41,7 @@ use {
 ///
 /// It includes the cryptographic proof as well as the context data information needed to verify
 /// the proof.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct GroupedCiphertext3HandlesValidityProofData {
@@ -42,6 +50,7 @@ pub struct GroupedCiphertext3HandlesValidityProofData {
     pub proof: PodGroupedCiphertext3HandlesValidityProof,
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct GroupedCiphertext3HandlesValidityProofContext {
@@ -55,6 +64,7 @@ pub struct GroupedCiphertext3HandlesValidityProofContext {
 }
 
 #[cfg(not(target_os = "solana"))]
+#[cfg(not(target_arch = "wasm32"))]
 impl GroupedCiphertext3HandlesValidityProofData {
     pub fn new(
         first_pubkey: &ElGamalPubkey,
@@ -91,6 +101,50 @@ impl GroupedCiphertext3HandlesValidityProofData {
         Ok(Self { context, proof })
     }
 }
+
+// Define a separate constructor for `wasm32` target since `wasm_bindgen` does
+// not yet support parameters with generic constants (i.e.
+// `GroupedElGamalCiphertext<3>`).
+#[cfg(target_arch = "wasm32")]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl GroupedCiphertext3HandlesValidityProofData {
+    pub fn new(
+        first_pubkey: &ElGamalPubkey,
+        second_pubkey: &ElGamalPubkey,
+        third_pubkey: &ElGamalPubkey,
+        grouped_ciphertext: &GroupedElGamalCiphertext3Handles,
+        amount: u64,
+        opening: &PedersenOpening,
+    ) -> Result<Self, ProofGenerationError> {
+        let pod_first_pubkey = PodElGamalPubkey(first_pubkey.into());
+        let pod_second_pubkey = PodElGamalPubkey(second_pubkey.into());
+        let pod_third_pubkey = PodElGamalPubkey(third_pubkey.into());
+        let pod_grouped_ciphertext = grouped_ciphertext.0.into();
+
+        let context = GroupedCiphertext3HandlesValidityProofContext {
+            first_pubkey: pod_first_pubkey,
+            second_pubkey: pod_second_pubkey,
+            third_pubkey: pod_third_pubkey,
+            grouped_ciphertext: pod_grouped_ciphertext,
+        };
+
+        let mut transcript = context.new_transcript();
+
+        let proof = GroupedCiphertext3HandlesValidityProof::new(
+            first_pubkey,
+            second_pubkey,
+            third_pubkey,
+            amount,
+            opening,
+            &mut transcript,
+        )
+        .into();
+
+        Ok(Self { context, proof })
+    }
+}
+
+impl_wasm_to_bytes!(TYPE = GroupedCiphertext3HandlesValidityProofData);
 
 impl ZkProofData<GroupedCiphertext3HandlesValidityProofContext>
     for GroupedCiphertext3HandlesValidityProofData
@@ -145,6 +199,8 @@ impl GroupedCiphertext3HandlesValidityProofContext {
         transcript
     }
 }
+
+impl_wasm_to_bytes!(TYPE = GroupedCiphertext3HandlesValidityProofContext);
 
 #[cfg(test)]
 mod test {

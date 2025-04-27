@@ -1,15 +1,13 @@
 #![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
 #![allow(clippy::arithmetic_side_effects)]
 use {
+    agave_feature_set::{self as feature_set, FeatureSet},
     ahash::AHashMap,
     lazy_static::lazy_static,
-    solana_sdk::{
+    solana_pubkey::Pubkey,
+    solana_sdk_ids::{
         address_lookup_table, bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
-        compute_budget, ed25519_program,
-        feature_set::{self, FeatureSet},
-        loader_v4,
-        pubkey::Pubkey,
-        secp256k1_program,
+        compute_budget, ed25519_program, loader_v4, secp256k1_program, stake, system_program, vote,
     },
 };
 
@@ -42,14 +40,14 @@ pub enum BuiltinCost {
 }
 
 impl BuiltinCost {
-    pub fn native_cost(&self) -> u64 {
+    fn native_cost(&self) -> u64 {
         match self {
             BuiltinCost::Migrating(MigratingBuiltinCost { native_cost, .. }) => *native_cost,
             BuiltinCost::NotMigrating(NotMigratingBuiltinCost { native_cost }) => *native_cost,
         }
     }
 
-    pub fn core_bpf_migration_feature(&self) -> Option<&Pubkey> {
+    fn core_bpf_migration_feature(&self) -> Option<&Pubkey> {
         match self {
             BuiltinCost::Migrating(MigratingBuiltinCost {
                 core_bpf_migration_feature,
@@ -59,7 +57,7 @@ impl BuiltinCost {
         }
     }
 
-    pub fn position(&self) -> Option<usize> {
+    fn position(&self) -> Option<usize> {
         match self {
             BuiltinCost::Migrating(MigratingBuiltinCost { position, .. }) => Some(*position),
             BuiltinCost::NotMigrating(_) => None,
@@ -103,16 +101,16 @@ lazy_static! {
 /// correctly furnishing `core_bpf_migration_feature`.
 ///
 #[allow(dead_code)]
-const TOTAL_COUNT_BUILTS: usize = 12;
+const TOTAL_COUNT_BUILTINS: usize = 11;
 #[cfg(test)]
 static_assertions::const_assert_eq!(
     MIGRATING_BUILTINS_COSTS.len() + NON_MIGRATING_BUILTINS_COSTS.len(),
-    TOTAL_COUNT_BUILTS
+    TOTAL_COUNT_BUILTINS
 );
 
 pub const MIGRATING_BUILTINS_COSTS: &[(Pubkey, BuiltinCost)] = &[
     (
-        solana_stake_program::id(),
+        stake::id(),
         BuiltinCost::Migrating(MigratingBuiltinCost {
             native_cost: solana_stake_program::stake_instruction::DEFAULT_COMPUTE_UNITS,
             core_bpf_migration_feature: feature_set::migrate_stake_program_to_core_bpf::id(),
@@ -120,33 +118,25 @@ pub const MIGRATING_BUILTINS_COSTS: &[(Pubkey, BuiltinCost)] = &[
         }),
     ),
     (
-        solana_config_program::id(),
-        BuiltinCost::Migrating(MigratingBuiltinCost {
-            native_cost: solana_config_program::config_processor::DEFAULT_COMPUTE_UNITS,
-            core_bpf_migration_feature: feature_set::migrate_config_program_to_core_bpf::id(),
-            position: 1,
-        }),
-    ),
-    (
-        address_lookup_table::program::id(),
+        address_lookup_table::id(),
         BuiltinCost::Migrating(MigratingBuiltinCost {
             native_cost: solana_address_lookup_table_program::processor::DEFAULT_COMPUTE_UNITS,
             core_bpf_migration_feature:
                 feature_set::migrate_address_lookup_table_program_to_core_bpf::id(),
-            position: 2,
+            position: 1,
         }),
     ),
 ];
 
-pub const NON_MIGRATING_BUILTINS_COSTS: &[(Pubkey, BuiltinCost)] = &[
+const NON_MIGRATING_BUILTINS_COSTS: &[(Pubkey, BuiltinCost)] = &[
     (
-        solana_vote_program::id(),
+        vote::id(),
         BuiltinCost::NotMigrating(NotMigratingBuiltinCost {
             native_cost: solana_vote_program::vote_processor::DEFAULT_COMPUTE_UNITS,
         }),
     ),
     (
-        solana_system_program::id(),
+        system_program::id(),
         BuiltinCost::NotMigrating(NotMigratingBuiltinCost {
             native_cost: solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS,
         }),
@@ -301,15 +291,11 @@ mod test {
         // use native cost if migration is planned but not activated
         assert_eq!(
             Some(solana_stake_program::stake_instruction::DEFAULT_COMPUTE_UNITS),
-            get_builtin_instruction_cost(&solana_stake_program::id(), &FeatureSet::default())
+            get_builtin_instruction_cost(&stake::id(), &FeatureSet::default())
         );
 
         // None if migration is planned and activated, in which case, it's no longer builtin
-        assert!(get_builtin_instruction_cost(
-            &solana_stake_program::id(),
-            &FeatureSet::all_enabled()
-        )
-        .is_none());
+        assert!(get_builtin_instruction_cost(&stake::id(), &FeatureSet::all_enabled()).is_none());
 
         // None if not builtin
         assert!(
@@ -331,7 +317,7 @@ mod test {
             get_builtin_migration_feature_index(&compute_budget::id()),
             BuiltinMigrationFeatureIndex::BuiltinNoMigrationFeature,
         ));
-        let feature_index = get_builtin_migration_feature_index(&solana_stake_program::id());
+        let feature_index = get_builtin_migration_feature_index(&stake::id());
         assert!(matches!(
             feature_index,
             BuiltinMigrationFeatureIndex::BuiltinWithMigrationFeature(_)
@@ -345,22 +331,7 @@ mod test {
             get_migration_feature_id(feature_index),
             &feature_set::migrate_stake_program_to_core_bpf::id()
         );
-        let feature_index = get_builtin_migration_feature_index(&solana_config_program::id());
-        assert!(matches!(
-            feature_index,
-            BuiltinMigrationFeatureIndex::BuiltinWithMigrationFeature(_)
-        ));
-        let BuiltinMigrationFeatureIndex::BuiltinWithMigrationFeature(feature_index) =
-            feature_index
-        else {
-            panic!("expect migrating builtin")
-        };
-        assert_eq!(
-            get_migration_feature_id(feature_index),
-            &feature_set::migrate_config_program_to_core_bpf::id()
-        );
-        let feature_index =
-            get_builtin_migration_feature_index(&address_lookup_table::program::id());
+        let feature_index = get_builtin_migration_feature_index(&address_lookup_table::id());
         assert!(matches!(
             feature_index,
             BuiltinMigrationFeatureIndex::BuiltinWithMigrationFeature(_)

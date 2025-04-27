@@ -56,6 +56,7 @@ use {
         gossip_service::{discover, get_client},
     },
     solana_measure::measure::Measure,
+    solana_net_utils::bind_to_unspecified,
     solana_rpc_client::rpc_client::RpcClient,
     solana_sdk::{
         hash::Hash,
@@ -73,7 +74,7 @@ use {
     solana_tps_client::TpsClient,
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
-        net::{SocketAddr, UdpSocket},
+        net::SocketAddr,
         process::exit,
         sync::Arc,
         thread,
@@ -258,14 +259,13 @@ fn create_sender_thread(
     tpu_use_quic: bool,
 ) -> thread::JoinHandle<()> {
     // ConnectionCache is used instead of client because it gives ~6% higher pps
-    let connection_cache = match tpu_use_quic {
-        true => ConnectionCache::new_quic(
+    let connection_cache = if tpu_use_quic {
+        ConnectionCache::new_quic(
             "connection_cache_dos_quic",
             DEFAULT_TPU_CONNECTION_POOL_SIZE,
-        ),
-        false => {
-            ConnectionCache::with_udp("connection_cache_dos_udp", DEFAULT_TPU_CONNECTION_POOL_SIZE)
-        }
+        )
+    } else {
+        ConnectionCache::with_udp("connection_cache_dos_udp", DEFAULT_TPU_CONNECTION_POOL_SIZE)
     };
     let connection = connection_cache.get_connection(target);
 
@@ -306,7 +306,7 @@ fn create_sender_thread(
                             stats_count += len;
                             total_count += len;
                             if iterations != 0 && total_count >= iterations {
-                                info!("All transactions has been sent");
+                                info!("All transactions have been sent");
                                 // dropping receiver to signal generator threads to stop
                                 drop(tx_receiver);
                                 break;
@@ -360,7 +360,7 @@ fn create_generator_thread<T: 'static + TpsClient + Send + Sync>(
     // and hence this choice of n provides large enough number of permutations
     let mut keypairs_flat: Vec<Keypair> = Vec::new();
     // 1000 is arbitrary number. In case of permutation_size > 1,
-    // this guaranties large enough set of unique permutations
+    // this guarantees large enough set of unique permutations
     let permutation_size = get_permutation_size(
         transaction_params.num_signatures.as_ref(),
         transaction_params.num_instructions.as_ref(),
@@ -442,7 +442,7 @@ fn get_target(
         info!("ADDR = {}", entrypoint_addr);
 
         for node in nodes {
-            if node.gossip().ok() == Some(entrypoint_addr) {
+            if node.gossip() == Some(entrypoint_addr) {
                 info!("{:?}", node.gossip());
                 target = match mode {
                     Mode::Gossip => Some((*node.pubkey(), node.gossip().unwrap())),
@@ -475,7 +475,7 @@ fn get_rpc_client(
 
     // find target node
     for node in nodes {
-        if node.gossip().ok() == Some(entrypoint_addr) {
+        if node.gossip() == Some(entrypoint_addr) {
             info!("{:?}", node.gossip());
             return Ok(RpcClient::new_socket(node.rpc().unwrap()));
         }
@@ -550,7 +550,7 @@ fn create_payers<T: 'static + TpsClient + Send + Sync>(
     // Assume that if we use valid blockhash, we also have a payer
     if valid_blockhash {
         // each payer is used to fund transaction
-        // transactions are built to be invalid so the the amount here is arbitrary
+        // transactions are built to be invalid so the amount here is arbitrary
         let funding_key = Keypair::new();
         let funding_key = Arc::new(funding_key);
         let res = generate_and_fund_keypairs(
@@ -725,7 +725,7 @@ fn run_dos<T: 'static + TpsClient + Send + Sync>(
             _ => panic!("Unsupported data_type detected"),
         };
 
-        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let socket = bind_to_unspecified().unwrap();
         let mut last_log = Instant::now();
         let mut total_count: usize = 0;
         let mut count: usize = 0;
@@ -970,9 +970,13 @@ pub mod test {
         let node = cluster.get_contact_info(&nodes[0]).unwrap().clone();
         let nodes_slice = [node];
 
-        let client = Arc::new(cluster.build_tpu_quic_client().unwrap_or_else(|err| {
-            panic!("Could not create TpuClient with Quic Cache {err:?}");
-        }));
+        let client = Arc::new(
+            cluster
+                .build_validator_tpu_quic_client(cluster.entry_point_info.pubkey())
+                .unwrap_or_else(|err| {
+                    panic!("Could not create TpuClient with Quic Cache {err:?}");
+                }),
+        );
 
         // creates one transaction with 8 valid signatures and sends it 10 times
         run_dos(
@@ -1075,7 +1079,7 @@ pub mod test {
         let cluster = LocalCluster::new(
             &mut ClusterConfig {
                 node_stakes: vec![999_990; num_nodes],
-                cluster_lamports: 200_000_000,
+                mint_lamports: 200_000_000,
                 validator_configs: make_identical_validator_configs(
                     &ValidatorConfig {
                         rpc_config: JsonRpcConfig {
@@ -1100,9 +1104,13 @@ pub mod test {
         let node = cluster.get_contact_info(&nodes[0]).unwrap().clone();
         let nodes_slice = [node];
 
-        let client = Arc::new(cluster.build_tpu_quic_client().unwrap_or_else(|err| {
-            panic!("Could not create TpuClient with Quic Cache {err:?}");
-        }));
+        let client = Arc::new(
+            cluster
+                .build_validator_tpu_quic_client(cluster.entry_point_info.pubkey())
+                .unwrap_or_else(|err| {
+                    panic!("Could not create TpuClient with Quic Cache {err:?}");
+                }),
+        );
 
         // creates one transaction and sends it 10 times
         // this is done in single thread

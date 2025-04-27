@@ -1,36 +1,37 @@
+#![allow(unused)]
+
 #[allow(deprecated)]
 use solana_sdk::sysvar::recent_blockhashes::{Entry as BlockhashesEntry, RecentBlockhashes};
 use {
+    agave_feature_set::FeatureSet,
     solana_bpf_loader_program::syscalls::{
         SyscallAbort, SyscallGetClockSysvar, SyscallGetRentSysvar, SyscallInvokeSignedRust,
         SyscallLog, SyscallMemcpy, SyscallMemset, SyscallSetReturnData,
     },
-    solana_compute_budget::compute_budget::ComputeBudget,
-    solana_feature_set::FeatureSet,
+    solana_fee_structure::{FeeDetails, FeeStructure},
     solana_program_runtime::{
+        execution_budget::{SVMTransactionExecutionBudget, SVMTransactionExecutionCost},
         invoke_context::InvokeContext,
-        loaded_programs::{
-            BlockRelation, ForkGraph, ProgramCache, ProgramCacheEntry, ProgramRuntimeEnvironments,
-        },
-        solana_rbpf::{
-            program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
+        loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry},
+        solana_sbpf::{
+            program::{BuiltinProgram, SBPFVersion},
             vm::Config,
         },
     },
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount},
+        bpf_loader, bpf_loader_deprecated,
         bpf_loader_upgradeable::{self, UpgradeableLoaderState},
         clock::{Clock, UnixTimestamp},
-        compute_budget, native_loader,
+        compute_budget, loader_v4, native_loader,
         pubkey::Pubkey,
         rent::Rent,
         slot_hashes::Slot,
         sysvar::SysvarId,
     },
-    solana_svm::{
-        transaction_processing_callback::{AccountState, TransactionProcessingCallback},
-        transaction_processor::TransactionBatchProcessor,
-    },
+    solana_svm::transaction_processor::TransactionBatchProcessor,
+    solana_svm_callback::{AccountState, InvokeContextCallback, TransactionProcessingCallback},
+    solana_svm_transaction::svm_message::SVMMessage,
     solana_type_overrides::sync::{Arc, RwLock},
     std::{
         cmp::Ordering,
@@ -65,6 +66,8 @@ pub struct MockBankCallback {
     pub inspected_accounts:
         Arc<RwLock<HashMap<Pubkey, Vec<(Option<AccountSharedData>, /* is_writable */ bool)>>>>,
 }
+
+impl InvokeContextCallback for MockBankCallback {}
 
 impl TransactionProcessingCallback for MockBankCallback {
     fn account_matches_owners(&self, account: &Pubkey, owners: &[Pubkey]) -> Option<usize> {
@@ -111,13 +114,68 @@ impl TransactionProcessingCallback for MockBankCallback {
 }
 
 impl MockBankCallback {
+    pub fn calculate_fee_details(message: &impl SVMMessage, prioritization_fee: u64) -> FeeDetails {
+        let signature_count = message
+            .num_transaction_signatures()
+            .saturating_add(message.num_ed25519_signatures())
+            .saturating_add(message.num_secp256k1_signatures())
+            .saturating_add(message.num_secp256r1_signatures());
+
+        FeeDetails::new(
+            signature_count.saturating_mul(FeeStructure::default().lamports_per_signature),
+            prioritization_fee,
+        )
+    }
+
     #[allow(unused)]
     pub fn override_feature_set(&mut self, new_set: FeatureSet) {
         self.feature_set = Arc::new(new_set)
     }
+
+    pub fn configure_sysvars(&self) {
+        // We must fill in the sysvar cache entries
+
+        // clock contents are important because we use them for a sysvar loading test
+        let clock = Clock {
+            slot: EXECUTION_SLOT,
+            epoch_start_timestamp: WALLCLOCK_TIME.saturating_sub(10) as UnixTimestamp,
+            epoch: EXECUTION_EPOCH,
+            leader_schedule_epoch: EXECUTION_EPOCH,
+            unix_timestamp: WALLCLOCK_TIME as UnixTimestamp,
+        };
+
+        let mut account_data = AccountSharedData::default();
+        account_data.set_data(bincode::serialize(&clock).unwrap());
+        self.account_shared_data
+            .write()
+            .unwrap()
+            .insert(Clock::id(), account_data);
+
+        // default rent is fine
+        let rent = Rent::default();
+
+        let mut account_data = AccountSharedData::default();
+        account_data.set_data(bincode::serialize(&rent).unwrap());
+        self.account_shared_data
+            .write()
+            .unwrap()
+            .insert(Rent::id(), account_data);
+
+        // SystemInstruction::AdvanceNonceAccount asserts RecentBlockhashes is non-empty
+        // but then just gets the blockhash from InvokeContext. so the sysvar doesnt need real entries
+        #[allow(deprecated)]
+        let recent_blockhashes = vec![BlockhashesEntry::default()];
+
+        let mut account_data = AccountSharedData::default();
+        account_data.set_data(bincode::serialize(&recent_blockhashes).unwrap());
+        #[allow(deprecated)]
+        self.account_shared_data
+            .write()
+            .unwrap()
+            .insert(RecentBlockhashes::id(), account_data);
+    }
 }
 
-#[allow(unused)]
 fn load_program(name: String) -> Vec<u8> {
     // Loading the program file
     let mut dir = env::current_dir().unwrap();
@@ -133,22 +191,18 @@ fn load_program(name: String) -> Vec<u8> {
     buffer
 }
 
-#[allow(unused)]
 pub fn program_address(program_name: &str) -> Pubkey {
     Pubkey::create_with_seed(&Pubkey::default(), program_name, &Pubkey::default()).unwrap()
 }
 
-#[allow(unused)]
 pub fn program_data_size(program_name: &str) -> usize {
     load_program(program_name.to_string()).len()
 }
 
-#[allow(unused)]
 pub fn deploy_program(name: String, deployment_slot: Slot, mock_bank: &MockBankCallback) -> Pubkey {
     deploy_program_with_upgrade_authority(name, deployment_slot, mock_bank, None)
 }
 
-#[allow(unused)]
 pub fn deploy_program_with_upgrade_authority(
     name: String,
     deployment_slot: Slot,
@@ -179,7 +233,7 @@ pub fn deploy_program_with_upgrade_authority(
     let mut account_data = AccountSharedData::default();
     let state = UpgradeableLoaderState::ProgramData {
         slot: deployment_slot,
-        upgrade_authority_address: None,
+        upgrade_authority_address,
     };
     let mut header = bincode::serialize(&state).unwrap();
     let mut complement = vec![
@@ -204,87 +258,63 @@ pub fn deploy_program_with_upgrade_authority(
     program_account
 }
 
-#[allow(unused)]
-pub fn create_executable_environment(
-    fork_graph: Arc<RwLock<MockForkGraph>>,
-    mock_bank: &MockBankCallback,
-    program_cache: &mut ProgramCache<MockForkGraph>,
-) {
-    program_cache.environments = ProgramRuntimeEnvironments {
-        program_runtime_v1: Arc::new(create_custom_environment()),
-        // We are not using program runtime v2
-        program_runtime_v2: Arc::new(BuiltinProgram::new_loader(
-            Config::default(),
-            FunctionRegistry::default(),
-        )),
-    };
-
-    program_cache.fork_graph = Some(Arc::downgrade(&fork_graph));
-
-    // We must fill in the sysvar cache entries
-
-    // clock contents are important because we use them for a sysvar loading test
-    let clock = Clock {
-        slot: EXECUTION_SLOT,
-        epoch_start_timestamp: WALLCLOCK_TIME.saturating_sub(10) as UnixTimestamp,
-        epoch: EXECUTION_EPOCH,
-        leader_schedule_epoch: EXECUTION_EPOCH,
-        unix_timestamp: WALLCLOCK_TIME as UnixTimestamp,
-    };
-
-    let mut account_data = AccountSharedData::default();
-    account_data.set_data(bincode::serialize(&clock).unwrap());
-    mock_bank
-        .account_shared_data
-        .write()
-        .unwrap()
-        .insert(Clock::id(), account_data);
-
-    // default rent is fine
-    let rent = Rent::default();
-
-    let mut account_data = AccountSharedData::default();
-    account_data.set_data(bincode::serialize(&rent).unwrap());
-    mock_bank
-        .account_shared_data
-        .write()
-        .unwrap()
-        .insert(Rent::id(), account_data);
-
-    // SystemInstruction::AdvanceNonceAccount asserts RecentBlockhashes is non-empty
-    // but then just gets the blockhash from InvokeContext. so the sysvar doesnt need real entries
-    #[allow(deprecated)]
-    let recent_blockhashes = vec![BlockhashesEntry::default()];
-
-    let mut account_data = AccountSharedData::default();
-    account_data.set_data(bincode::serialize(&recent_blockhashes).unwrap());
-    #[allow(deprecated)]
-    mock_bank
-        .account_shared_data
-        .write()
-        .unwrap()
-        .insert(RecentBlockhashes::id(), account_data);
-}
-
-#[allow(unused)]
 pub fn register_builtins(
     mock_bank: &MockBankCallback,
     batch_processor: &TransactionBatchProcessor<MockForkGraph>,
+    with_loader_v4: bool,
 ) {
     const DEPLOYMENT_SLOT: u64 = 0;
-    // We must register the bpf loader account as a loadable account, otherwise programs
-    // won't execute.
-    let bpf_loader_name = "solana_bpf_loader_upgradeable_program";
+    // We must register LoaderV3 as a loadable account, otherwise programs won't execute.
+    let loader_v3_name = "solana_bpf_loader_upgradeable_program";
     batch_processor.add_builtin(
         mock_bank,
         bpf_loader_upgradeable::id(),
-        bpf_loader_name,
+        loader_v3_name,
         ProgramCacheEntry::new_builtin(
             DEPLOYMENT_SLOT,
-            bpf_loader_name.len(),
+            loader_v3_name.len(),
             solana_bpf_loader_program::Entrypoint::vm,
         ),
     );
+
+    // Other loaders are needed for testing program cache behavior.
+    let loader_v1_name = "solana_bpf_loader_deprecated_program";
+    batch_processor.add_builtin(
+        mock_bank,
+        bpf_loader_deprecated::id(),
+        loader_v1_name,
+        ProgramCacheEntry::new_builtin(
+            DEPLOYMENT_SLOT,
+            loader_v1_name.len(),
+            solana_bpf_loader_program::Entrypoint::vm,
+        ),
+    );
+
+    let loader_v2_name = "solana_bpf_loader_program";
+    batch_processor.add_builtin(
+        mock_bank,
+        bpf_loader::id(),
+        loader_v2_name,
+        ProgramCacheEntry::new_builtin(
+            DEPLOYMENT_SLOT,
+            loader_v2_name.len(),
+            solana_bpf_loader_program::Entrypoint::vm,
+        ),
+    );
+
+    if with_loader_v4 {
+        let loader_v4_name = "solana_loader_v4_program";
+        batch_processor.add_builtin(
+            mock_bank,
+            loader_v4::id(),
+            loader_v4_name,
+            ProgramCacheEntry::new_builtin(
+                DEPLOYMENT_SLOT,
+                loader_v4_name.len(),
+                solana_loader_v4_program::Entrypoint::vm,
+            ),
+        );
+    }
 
     // In order to perform a transference of native tokens using the system instruction,
     // the system program builtin must be registered.
@@ -314,9 +344,8 @@ pub fn register_builtins(
     );
 }
 
-#[allow(unused)]
-fn create_custom_environment<'a>() -> BuiltinProgram<InvokeContext<'a>> {
-    let compute_budget = ComputeBudget::default();
+pub fn create_custom_loader<'a>() -> BuiltinProgram<InvokeContext<'a>> {
+    let compute_budget = SVMTransactionExecutionBudget::default();
     let vm_config = Config {
         max_call_depth: compute_budget.max_call_depth,
         stack_frame_size: compute_budget.stack_frame_size,
@@ -329,45 +358,37 @@ fn create_custom_environment<'a>() -> BuiltinProgram<InvokeContext<'a>> {
         reject_broken_elfs: true,
         noop_instruction_rate: 256,
         sanitize_user_provided_values: true,
-        external_internal_function_hash_collision: false,
-        reject_callx_r10: true,
-        enable_sbpf_v1: true,
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V3,
         optimize_rodata: false,
         aligned_memory_mapping: true,
     };
 
     // These functions are system calls the compile contract calls during execution, so they
     // need to be registered.
-    let mut function_registry = FunctionRegistry::<BuiltinFunction<InvokeContext>>::default();
-    function_registry
-        .register_function_hashed(*b"abort", SyscallAbort::vm)
+    let mut loader = BuiltinProgram::new_loader(vm_config);
+    loader
+        .register_function("abort", SyscallAbort::vm)
         .expect("Registration failed");
-    function_registry
-        .register_function_hashed(*b"sol_log_", SyscallLog::vm)
+    loader
+        .register_function("sol_log_", SyscallLog::vm)
         .expect("Registration failed");
-    function_registry
-        .register_function_hashed(*b"sol_memcpy_", SyscallMemcpy::vm)
+    loader
+        .register_function("sol_memcpy_", SyscallMemcpy::vm)
         .expect("Registration failed");
-    function_registry
-        .register_function_hashed(*b"sol_memset_", SyscallMemset::vm)
+    loader
+        .register_function("sol_memset_", SyscallMemset::vm)
         .expect("Registration failed");
-
-    function_registry
-        .register_function_hashed(*b"sol_invoke_signed_rust", SyscallInvokeSignedRust::vm)
+    loader
+        .register_function("sol_invoke_signed_rust", SyscallInvokeSignedRust::vm)
         .expect("Registration failed");
-
-    function_registry
-        .register_function_hashed(*b"sol_set_return_data", SyscallSetReturnData::vm)
+    loader
+        .register_function("sol_set_return_data", SyscallSetReturnData::vm)
         .expect("Registration failed");
-
-    function_registry
-        .register_function_hashed(*b"sol_get_clock_sysvar", SyscallGetClockSysvar::vm)
+    loader
+        .register_function("sol_get_clock_sysvar", SyscallGetClockSysvar::vm)
         .expect("Registration failed");
-
-    function_registry
-        .register_function_hashed(*b"sol_get_rent_sysvar", SyscallGetRentSysvar::vm)
+    loader
+        .register_function("sol_get_rent_sysvar", SyscallGetRentSysvar::vm)
         .expect("Registration failed");
-
-    BuiltinProgram::new_loader(vm_config, function_registry)
+    loader
 }

@@ -5,8 +5,7 @@ use {
     serde_derive::{Deserialize, Serialize},
     serde_json::Result,
     solana_bpf_loader_program::{
-        create_vm, load_program_from_bytes, serialization::serialize_parameters,
-        syscalls::create_program_runtime_environment_v1,
+        create_vm, load_program_from_bytes, syscalls::create_program_runtime_environment_v1,
     },
     solana_cli_output::{OutputFormat, QuietDisplay, VerboseDisplay},
     solana_ledger::blockstore_options::AccessType,
@@ -15,13 +14,14 @@ use {
         loaded_programs::{
             LoadProgramMetrics, ProgramCacheEntryType, DELAY_VISIBILITY_SLOT_OFFSET,
         },
+        serialization::serialize_parameters,
         with_mock_invoke_context,
     },
-    solana_rbpf::{
+    solana_runtime::bank::Bank,
+    solana_sbpf::{
         assembler::assemble, elf::Executable, static_analysis::Analysis,
         verifier::RequisiteVerifier,
     },
-    solana_runtime::bank::Bank,
     solana_sdk::{
         account::{create_account_shared_data_for_test, AccountSharedData},
         account_utils::StateMut,
@@ -29,8 +29,8 @@ use {
         pubkey::Pubkey,
         slot_history::Slot,
         sysvar,
-        transaction_context::{IndexOfAccount, InstructionAccount},
     },
+    solana_transaction_context::{IndexOfAccount, InstructionAccount},
     std::{
         collections::HashMap,
         fmt::{self, Debug, Formatter},
@@ -60,6 +60,7 @@ struct Account {
 struct Input {
     program_id: String,
     accounts: Vec<Account>,
+    #[serde(with = "serde_bytes")]
     instruction_data: Vec<u8>,
 }
 fn load_accounts(path: &Path) -> Result<Input> {
@@ -537,6 +538,9 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
             &instruction_data,
         );
     invoke_context.push().unwrap();
+    let mask_out_rent_epoch_in_vm_serialization = invoke_context
+        .get_feature_set()
+        .is_active(&agave_feature_set::mask_out_rent_epoch_in_vm_serialization::id());
     let (_parameter_bytes, regions, account_lengths) = serialize_parameters(
         invoke_context.transaction_context,
         invoke_context
@@ -544,6 +548,7 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
             .get_current_instruction_context()
             .unwrap(),
         true, // copy_account_data
+        mask_out_rent_epoch_in_vm_serialization,
     )
     .unwrap();
 

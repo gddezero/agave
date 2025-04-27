@@ -6,15 +6,16 @@ use {
         bank::Bank,
         bank_client::BankClient,
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
-        loader_utils::load_upgradeable_program_and_advance_slot,
+        loader_utils::load_program_of_loader_v4,
     },
+    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_sdk::{
         instruction::{AccountMeta, Instruction},
         message::Message,
         pubkey::Pubkey,
         signature::{Keypair, Signer},
         sysvar::{clock, slot_history},
-        transaction::{SanitizedTransaction, Transaction},
+        transaction::Transaction,
     },
 };
 
@@ -30,7 +31,7 @@ fn test_no_panic_banks_client() {
     let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
     let mut bank_client = BankClient::new_shared(bank.clone());
     let authority_keypair = Keypair::new();
-    let (bank, program_id) = load_upgradeable_program_and_advance_slot(
+    let (bank, program_id) = load_program_of_loader_v4(
         &mut bank_client,
         bank_forks.as_ref(),
         &mint_keypair,
@@ -50,7 +51,7 @@ fn test_no_panic_banks_client() {
     let blockhash = bank.last_blockhash();
     let message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let transaction = Transaction::new(&[&mint_keypair], message, blockhash);
-    let sanitized_tx = SanitizedTransaction::from_transaction_for_tests(transaction);
+    let sanitized_tx = RuntimeTransaction::from_transaction_for_tests(transaction);
     let result = bank.simulate_transaction(&sanitized_tx, false);
     assert!(result.result.is_ok());
 }

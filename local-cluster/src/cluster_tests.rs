@@ -8,27 +8,27 @@ use {
     rand::{thread_rng, Rng},
     rayon::{prelude::*, ThreadPool},
     solana_client::connection_cache::ConnectionCache,
-    solana_core::consensus::VOTE_THRESHOLD_DEPTH,
     solana_entry::entry::{self, Entry, EntrySlice},
     solana_gossip::{
         cluster_info::{self, ClusterInfo},
         contact_info::ContactInfo,
         crds::Cursor,
-        crds_value::{self, CrdsData, CrdsValue, CrdsValueLabel},
+        crds_data::{self, CrdsData},
+        crds_value::{CrdsValue, CrdsValueLabel},
         gossip_error::GossipError,
         gossip_service::{self, discover_cluster, GossipService},
     },
     solana_ledger::blockstore::Blockstore,
     solana_rpc_client::rpc_client::RpcClient,
     solana_sdk::{
-        clock::{self, Slot, NUM_CONSECUTIVE_LEADER_SLOTS},
+        clock::{self, Slot},
         commitment_config::CommitmentConfig,
         epoch_schedule::MINIMUM_SLOTS_PER_EPOCH,
         exit::Exit,
         hash::Hash,
         poh_config::PohConfig,
         pubkey::Pubkey,
-        signature::{Keypair, Signature, Signer},
+        signature::{Keypair, Signer},
         system_transaction,
         timing::timestamp,
         transaction::Transaction,
@@ -36,8 +36,8 @@ use {
     },
     solana_streamer::socket::SocketAddrSpace,
     solana_tpu_client::tpu_client::{TpuClient, TpuClientConfig, TpuSenderError},
-    solana_vote::vote_transaction::VoteTransaction,
-    solana_vote_program::{vote_state::TowerSync, vote_transaction},
+    solana_vote::vote_transaction::{self, VoteTransaction},
+    solana_vote_program::vote_state::TowerSync,
     std::{
         collections::{HashMap, HashSet, VecDeque},
         net::{SocketAddr, TcpListener},
@@ -73,7 +73,7 @@ pub fn spend_and_verify_all_nodes<S: ::std::hash::BuildHasher + Sync + Send>(
         socket_addr_space,
     )
     .unwrap();
-    assert!(cluster_nodes.len() >= nodes);
+    assert_eq!(cluster_nodes.len(), nodes);
     let ignore_nodes = Arc::new(ignore_nodes);
     cluster_nodes.par_iter().for_each(|ingress_node| {
         if ignore_nodes.contains(ingress_node.pubkey()) {
@@ -95,13 +95,11 @@ pub fn spend_and_verify_all_nodes<S: ::std::hash::BuildHasher + Sync + Send>(
             .unwrap();
         let mut transaction =
             system_transaction::transfer(funding_keypair, &random_keypair.pubkey(), 1, blockhash);
-        let confs = VOTE_THRESHOLD_DEPTH + 1;
         LocalCluster::send_transaction_with_retries(
             &client,
             &[funding_keypair],
             &mut transaction,
             10,
-            confs,
         )
         .unwrap();
         for validator in &cluster_nodes {
@@ -109,9 +107,8 @@ pub fn spend_and_verify_all_nodes<S: ::std::hash::BuildHasher + Sync + Send>(
                 continue;
             }
             let client = new_tpu_quic_client(ingress_node, connection_cache.clone()).unwrap();
-            client
-                .rpc_client()
-                .poll_for_signature_confirmation(&transaction.signatures[0], confs)
+            LocalCluster::poll_for_processed_transaction(&client, &transaction)
+                .unwrap()
                 .unwrap();
         }
     });
@@ -169,7 +166,6 @@ pub fn send_many_transactions(
             &[funding_keypair],
             &mut transaction,
             5,
-            0,
         )
         .unwrap();
 
@@ -236,6 +232,8 @@ pub fn kill_entry_and_spend_and_verify_rest(
     socket_addr_space: SocketAddrSpace,
 ) {
     info!("kill_entry_and_spend_and_verify_rest...");
+
+    // Ensure all nodes have spun up and are funded.
     let cluster_nodes = discover_cluster(
         &entry_point_info.gossip().unwrap(),
         nodes,
@@ -244,10 +242,6 @@ pub fn kill_entry_and_spend_and_verify_rest(
     .unwrap();
     assert!(cluster_nodes.len() >= nodes);
     let client = new_tpu_quic_client(entry_point_info, connection_cache.clone()).unwrap();
-
-    // sleep long enough to make sure we are in epoch 3
-    let first_two_epoch_slots = MINIMUM_SLOTS_PER_EPOCH * (3 + 1);
-
     for ingress_node in &cluster_nodes {
         client
             .rpc_client()
@@ -255,22 +249,22 @@ pub fn kill_entry_and_spend_and_verify_rest(
             .unwrap_or_else(|err| panic!("Node {} has no balance: {}", ingress_node.pubkey(), err));
     }
 
-    info!("sleeping for 2 leader fortnights");
-    sleep(Duration::from_millis(slot_millis * first_two_epoch_slots));
-    info!("done sleeping for first 2 warmup epochs");
+    // Kill the entry point node and wait for it to die.
     info!("killing entry point: {}", entry_point_info.pubkey());
     entry_point_validator_exit.write().unwrap().exit();
-    info!("sleeping for some time");
-    sleep(Duration::from_millis(
-        slot_millis * NUM_CONSECUTIVE_LEADER_SLOTS,
-    ));
-    info!("done sleeping for 2 fortnights");
+    info!("sleeping for some time to let entry point exit and partitions to resolve...");
+    sleep(Duration::from_millis(slot_millis * MINIMUM_SLOTS_PER_EPOCH));
+    info!("done sleeping");
+
+    // Ensure all other nodes are still alive and able to ingest and confirm
+    // transactions.
     for ingress_node in &cluster_nodes {
         if ingress_node.pubkey() == entry_point_info.pubkey() {
             info!("ingress_node.id == entry_point_info.id, continuing...");
             continue;
         }
 
+        // Ensure the current ingress node is still funded.
         let client = new_tpu_quic_client(ingress_node, connection_cache.clone()).unwrap();
         let balance = client
             .rpc_client()
@@ -283,12 +277,16 @@ pub fn kill_entry_and_spend_and_verify_rest(
 
         let mut result = Ok(());
         let mut retries = 0;
+
+        // Retry sending a transaction to the current ingress node until it is
+        // observed by the entire cluster or we exhaust all retries.
         loop {
             retries += 1;
             if retries > 5 {
                 result.unwrap();
             }
 
+            // Send a simple transfer transaction to the current ingress node.
             let random_keypair = Keypair::new();
             let (blockhash, _) = client
                 .rpc_client()
@@ -301,31 +299,24 @@ pub fn kill_entry_and_spend_and_verify_rest(
                 blockhash,
             );
 
-            let confs = VOTE_THRESHOLD_DEPTH + 1;
-            let sig = {
-                let sig = LocalCluster::send_transaction_with_retries(
-                    &client,
-                    &[funding_keypair],
-                    &mut transaction,
-                    5,
-                    confs,
-                );
-                match sig {
-                    Err(e) => {
-                        result = Err(e);
-                        continue;
-                    }
+            if let Err(err) = LocalCluster::send_transaction_with_retries(
+                &client,
+                &[funding_keypair],
+                &mut transaction,
+                5,
+            ) {
+                result = Err(err);
+                continue;
+            }
 
-                    Ok(sig) => sig,
-                }
-            };
+            // Ensure all non-entry point nodes are able to confirm the
+            // transaction.
             info!("poll_all_nodes_for_signature()");
             match poll_all_nodes_for_signature(
                 entry_point_info,
                 &cluster_nodes,
                 connection_cache,
-                &sig,
-                confs,
+                &transaction,
             ) {
                 Err(e) => {
                     info!("poll_all_nodes_for_signature() failed {:?}", e);
@@ -496,17 +487,14 @@ fn poll_all_nodes_for_signature(
     entry_point_info: &ContactInfo,
     cluster_nodes: &[ContactInfo],
     connection_cache: &Arc<ConnectionCache>,
-    sig: &Signature,
-    confs: usize,
+    transaction: &Transaction,
 ) -> Result<(), TransportError> {
     for validator in cluster_nodes {
         if validator.pubkey() == entry_point_info.pubkey() {
             continue;
         }
         let client = new_tpu_quic_client(validator, connection_cache.clone()).unwrap();
-        client
-            .rpc_client()
-            .poll_for_signature_confirmation(sig, confs)?;
+        LocalCluster::poll_for_processed_transaction(&client, transaction)?.unwrap();
     }
 
     Ok(())
@@ -675,11 +663,11 @@ pub fn submit_vote_to_cluster_gossip(
         None,
     );
 
-    cluster_info::push_messages_to_peer(
-        vec![CrdsValue::new_signed(
+    cluster_info::push_messages_to_peer_for_tests(
+        vec![CrdsValue::new(
             CrdsData::Vote(
                 0,
-                crds_value::Vote::new(node_keypair.pubkey(), vote_tx, timestamp()).unwrap(),
+                crds_data::Vote::new(node_keypair.pubkey(), vote_tx, timestamp()).unwrap(),
             ),
             node_keypair,
         )],

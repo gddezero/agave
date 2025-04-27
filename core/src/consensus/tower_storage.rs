@@ -31,7 +31,7 @@ impl SavedTowerVersions {
                 if !t.signature.verify(node_pubkey.as_ref(), &t.data) {
                     return Err(TowerError::InvalidSignature);
                 }
-                bincode::deserialize(&t.data).map(TowerVersions::V1_17_14)
+                bincode::deserialize(&t.data).map(TowerVersions::V1_7_14)
             }
             SavedTowerVersions::Current(t) => {
                 if !t.signature.verify(node_pubkey.as_ref(), &t.data) {
@@ -79,11 +79,12 @@ impl From<SavedTower1_7_14> for SavedTowerVersions {
 #[cfg_attr(
     feature = "frozen-abi",
     derive(AbiExample),
-    frozen_abi(digest = "JBXfVQ6BXHBGSNY919yEkXN4H7XxmAMA7QcGrf7DiWHP")
+    frozen_abi(digest = "GqJW8vVvSkSZwTJE6x6MFFhi7kcU6mqst8PF7493h2hk")
 )]
 #[derive(Default, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct SavedTower {
     signature: Signature,
+    #[serde(with = "serde_bytes")]
     data: Vec<u8>,
     #[serde(skip)]
     node_pubkey: Pubkey,
@@ -380,9 +381,9 @@ pub mod test {
             BlockhashStatus, Tower,
         },
         solana_sdk::{hash::Hash, signature::Keypair},
+        solana_vote::vote_transaction::VoteTransaction,
         solana_vote_program::vote_state::{
-            BlockTimestamp, LandedVote, Vote, VoteState, VoteState1_14_11, VoteTransaction,
-            MAX_LOCKOUT_HISTORY,
+            BlockTimestamp, LandedVote, Vote, VoteState, VoteState1_14_11, MAX_LOCKOUT_HISTORY,
         },
         tempfile::TempDir,
     };

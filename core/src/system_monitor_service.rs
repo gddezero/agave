@@ -402,15 +402,7 @@ enum InterestingLimit {
 #[cfg(target_os = "linux")]
 const INTERESTING_LIMITS: &[(&str, InterestingLimit)] = &[
     ("net.core.rmem_max", InterestingLimit::Recommend(134217728)),
-    (
-        "net.core.rmem_default",
-        InterestingLimit::Recommend(134217728),
-    ),
     ("net.core.wmem_max", InterestingLimit::Recommend(134217728)),
-    (
-        "net.core.wmem_default",
-        InterestingLimit::Recommend(134217728),
-    ),
     ("vm.max_map_count", InterestingLimit::Recommend(1000000)),
     ("net.core.optmem_max", InterestingLimit::QueryOnly),
     ("net.core.netdev_max_backlog", InterestingLimit::QueryOnly),
@@ -463,7 +455,7 @@ impl SystemMonitorService {
     ) -> bool {
         current_limits
             .iter()
-            .map(|(key, interesting_limit, current_value)| {
+            .all(|(key, interesting_limit, current_value)| {
                 datapoint_warn!("os-config", (key, *current_value, i64));
                 match interesting_limit {
                     InterestingLimit::Recommend(recommended_value)
@@ -485,7 +477,6 @@ impl SystemMonitorService {
                     }
                 }
             })
-            .all(|good| good)
     }
 
     #[cfg(not(target_os = "linux"))]

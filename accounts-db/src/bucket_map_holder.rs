@@ -8,8 +8,9 @@ use {
         waitable_condvar::WaitableCondvar,
     },
     solana_bucket_map::bucket_map::{BucketMap, BucketMapConfig},
+    solana_clock::Slot,
     solana_measure::measure::Measure,
-    solana_sdk::{clock::Slot, timing::AtomicInterval},
+    solana_time_utils::AtomicInterval,
     std::{
         fmt::Debug,
         marker::PhantomData,
@@ -53,7 +54,7 @@ pub struct BucketMapHolder<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>
     // used by bg processing to know when any bucket has become dirty
     pub wait_dirty_or_aged: Arc<WaitableCondvar>,
     next_bucket_to_flush: AtomicUsize,
-    bins: usize,
+    pub(crate) bins: usize,
 
     pub threads: usize,
 
@@ -135,7 +136,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
     /// return when the bg threads have reached an 'idle' state
     pub fn wait_for_idle(&self) {
         assert!(self.get_startup());
-        if self.disk.is_none() {
+        if !self.is_disk_index_enabled() {
             return;
         }
 
@@ -316,13 +317,18 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
         can_advance_age: bool,
     ) {
         let bins = in_mem.len();
-        let flush = self.disk.is_some();
+        let flush = self.is_disk_index_enabled();
         let mut throttling_wait_ms = None;
         loop {
             if !flush {
+                let mut m = Measure::start("wait");
                 self.wait_dirty_or_aged.wait_timeout(Duration::from_millis(
                     self.stats.remaining_until_next_interval(),
                 ));
+                m.stop();
+                self.stats
+                    .bg_waiting_us
+                    .fetch_add(m.as_us(), Ordering::Relaxed);
             } else if self.should_thread_sleep() || throttling_wait_ms.is_some() {
                 let mut wait = std::cmp::min(
                     self.age_timer

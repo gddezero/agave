@@ -10,34 +10,48 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+agave-feature-set = { workspace = true }
+ahash = { workspace = true }
 itertools = { workspace = true }
 log = { workspace = true }
 percentage = { workspace = true }
 qualifier_attr = { workspace = true, optional = true }
 serde = { workspace = true, features = ["rc"] }
 serde_derive = { workspace = true }
-solana-bpf-loader-program = { workspace = true }
-solana-compute-budget = { workspace = true }
-solana-feature-set = { workspace = true }
-solana-fee = { workspace = true }
+solana-account = { workspace = true }
+solana-clock = { workspace = true }
+solana-fee-structure = { workspace = true }
 solana-frozen-abi = { workspace = true, optional = true, features = [
     "frozen-abi",
 ] }
 solana-frozen-abi-macro = { workspace = true, optional = true, features = [
     "frozen-abi",
 ] }
+solana-hash = { workspace = true }
+solana-instruction = { workspace = true, features = ["std"] }
+solana-instructions-sysvar = { workspace = true }
+solana-loader-v3-interface = { workspace = true }
+solana-loader-v4-interface = { workspace = true }
 solana-loader-v4-program = { workspace = true }
 solana-log-collector = { workspace = true }
 solana-measure = { workspace = true }
-solana-program-runtime = { workspace = true }
-solana-runtime-transaction = { workspace = true }
+solana-message = { workspace = true }
+solana-nonce = { workspace = true }
+solana-nonce-account = { workspace = true }
+solana-program-runtime = { workspace = true, features = ["metrics"] }
+solana-pubkey = { workspace = true }
+solana-rent = { workspace = true }
+solana-rent-collector = { workspace = true }
+solana-rent-debits = { workspace = true }
 solana-sdk = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-svm-callback = { workspace = true }
 solana-svm-rent-collector = { workspace = true }
 solana-svm-transaction = { workspace = true }
-solana-system-program = { workspace = true }
 solana-timings = { workspace = true }
+solana-transaction-context = { workspace = true }
+solana-transaction-error = { workspace = true }
 solana-type-overrides = { workspace = true }
-solana-vote = { workspace = true }
 thiserror = { workspace = true }
 
 [lib]
@@ -45,48 +59,46 @@ crate-type = ["lib"]
 name = "solana_svm"
 
 [dev-dependencies]
+agave-reserved-account-keys = { workspace = true }
 assert_matches = { workspace = true }
-base64 = { workspace = true }
 bincode = { workspace = true }
-borsh = { version = "1.5.1", features = ["derive"] }
-bs58 = { workspace = true }
-clap = { workspace = true }
-crossbeam-channel = { workspace = true }
-env_logger = { workspace = true }
-home = "0.5"
-jsonrpc-core = { workspace = true }
-jsonrpc-core-client = { workspace = true }
-jsonrpc-derive = { workspace = true }
-jsonrpc-http-server = { workspace = true }
+ed25519-dalek = { workspace = true }
 lazy_static = { workspace = true }
 libsecp256k1 = { workspace = true }
+openssl = { workspace = true }
 prost = { workspace = true }
-rand = { workspace = true }
-serde_derive = { workspace = true }
-serde_json = { workspace = true }
+rand0-7 = { workspace = true }
 shuttle = { workspace = true }
-solana-account-decoder = { workspace = true }
-solana-accounts-db = { workspace = true }
 solana-bpf-loader-program = { workspace = true }
-solana-client = { workspace = true }
+solana-clock = { workspace = true }
+solana-compute-budget-instruction = { workspace = true }
+solana-compute-budget-interface = { workspace = true }
 solana-compute-budget-program = { workspace = true }
+solana-ed25519-program = { workspace = true }
+solana-epoch-schedule = { workspace = true }
+solana-fee-calculator = { workspace = true }
+solana-keypair = { workspace = true }
 solana-logger = { workspace = true }
-solana-perf = { workspace = true }
-solana-program = { workspace = true }
-solana-rpc-client = { workspace = true }
-solana-rpc-client-api = { workspace = true }
+solana-native-token = { workspace = true }
+solana-precompile-error = { workspace = true }
+solana-program-runtime = { workspace = true, features = ["dev-context-only-utils"] }
+solana-pubkey = { workspace = true }
+solana-rent = { workspace = true }
+solana-sbpf = { workspace = true }
 solana-sdk = { workspace = true, features = ["dev-context-only-utils"] }
+solana-secp256k1-program = { workspace = true }
+solana-secp256r1-program = { workspace = true, features = ["openssl-vendored"] }
+solana-signature = { workspace = true }
+solana-signer = { workspace = true }
 # See order-crates-for-publishing.py for using this unusual `path = "."`
-solana-svm = { path = ".", features = ["dev-context-only-utils"] }
+solana-svm = { path = ".", features = ["dev-context-only-utils", "svm-internal"] }
 solana-svm-conformance = { workspace = true }
-solana-transaction-status = { workspace = true }
-solana-version = { workspace = true }
-solana_rbpf = { workspace = true }
-spl-token-2022 = { workspace = true, features = ["no-entrypoint"] }
+solana-system-program = { workspace = true }
+solana-system-transaction = { workspace = true }
+solana-sysvar = { workspace = true }
+solana-transaction = { workspace = true }
+solana-transaction-context = { workspace = true, features = ["dev-context-only-utils"] }
 test-case = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["codec", "compat"] }
-yaml-rust = "0.4"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
@@ -96,7 +108,6 @@ dev-context-only-utils = ["dep:qualifier_attr"]
 frozen-abi = [
     "dep:solana-frozen-abi",
     "dep:solana-frozen-abi-macro",
-    "solana-compute-budget/frozen-abi",
     "solana-program-runtime/frozen-abi",
     "solana-sdk/frozen-abi",
 ]
@@ -106,21 +117,7 @@ shuttle-test = [
     "solana-bpf-loader-program/shuttle-test",
     "solana-loader-v4-program/shuttle-test",
 ]
-
-[[example]]
-name = "json-rpc-server"
-path = "examples/json-rpc/server/src/main.rs"
-crate-type = ["bin"]
-
-[[example]]
-name = "json-rpc-client"
-path = "examples/json-rpc/client/src/main.rs"
-crate-type = ["bin"]
-
-[[example]]
-name = "json-rpc-example-program"
-path = "examples/json-rpc/program/src/lib.rs"
-crate-type = ["cdylib", "lib"]
+svm-internal = []
 
 [lints]
 workspace = true

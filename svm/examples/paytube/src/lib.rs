@@ -63,14 +63,14 @@ use {
     crate::{
         loader::PayTubeAccountLoader, settler::PayTubeSettler, transaction::PayTubeTransaction,
     },
+    agave_feature_set::FeatureSet,
     processor::{
         create_transaction_batch_processor, get_transaction_check_results, PayTubeForkGraph,
     },
     solana_client::rpc_client::RpcClient,
-    solana_compute_budget::compute_budget::ComputeBudget,
+    solana_program_runtime::execution_budget::SVMTransactionExecutionBudget,
     solana_sdk::{
-        feature_set::FeatureSet, fee::FeeStructure, hash::Hash, rent_collector::RentCollector,
-        signature::Keypair,
+        fee::FeeStructure, hash::Hash, rent_collector::RentCollector, signature::Keypair,
     },
     solana_svm::transaction_processor::{
         TransactionProcessingConfig, TransactionProcessingEnvironment,
@@ -114,10 +114,9 @@ impl PayTubeChannel {
         // would likely be hoisted from the cluster.
         //
         // For example purposes, they are provided as defaults here.
-        let compute_budget = ComputeBudget::default();
+        let compute_budget = SVMTransactionExecutionBudget::default();
         let feature_set = FeatureSet::all_enabled();
         let fee_structure = FeeStructure::default();
-        let lamports_per_signature = fee_structure.lamports_per_signature;
         let rent_collector = RentCollector::default();
 
         // PayTube loader/callback implementation.
@@ -148,21 +147,16 @@ impl PayTubeChannel {
         // Again, these can be configurable or hoisted from the cluster.
         let processing_environment = TransactionProcessingEnvironment {
             blockhash: Hash::default(),
-            epoch_total_stake: None,
-            epoch_vote_accounts: None,
+            blockhash_lamports_per_signature: fee_structure.lamports_per_signature,
+            epoch_total_stake: 0,
             feature_set: Arc::new(feature_set),
-            fee_structure: Some(&fee_structure),
-            lamports_per_signature,
             rent_collector: Some(&rent_collector),
         };
 
         // The PayTube transaction processing config for Solana SVM.
         //
         // Extended configurations for even more customization of the SVM API.
-        let processing_config = TransactionProcessingConfig {
-            compute_budget: Some(compute_budget),
-            ..Default::default()
-        };
+        let processing_config = TransactionProcessingConfig::default();
 
         // Step 1: Convert the batch of PayTube transactions into
         // SVM-compatible transactions for processing.
@@ -177,7 +171,7 @@ impl PayTubeChannel {
         let results = processor.load_and_execute_sanitized_transactions(
             &account_loader,
             &svm_transactions,
-            get_transaction_check_results(svm_transactions.len(), lamports_per_signature),
+            get_transaction_check_results(svm_transactions.len()),
             &processing_environment,
             &processing_config,
         );

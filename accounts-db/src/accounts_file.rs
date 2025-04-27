@@ -3,13 +3,16 @@ use {
         account_info::AccountInfo,
         account_storage::meta::StoredAccountMeta,
         accounts_db::AccountsFileId,
+        accounts_update_notifier_interface::AccountForGeyser,
         append_vec::{AppendVec, AppendVecError, IndexInfo},
         storable_accounts::StorableAccounts,
         tiered_storage::{
             error::TieredStorageError, hot::HOT_FORMAT, index::IndexOffset, TieredStorage,
         },
     },
-    solana_sdk::{account::AccountSharedData, clock::Slot, pubkey::Pubkey},
+    solana_account::{AccountSharedData, ReadableAccount as _},
+    solana_clock::Slot,
+    solana_pubkey::Pubkey,
     std::{
         mem,
         path::{Path, PathBuf},
@@ -50,10 +53,11 @@ pub enum MatchAccountOwnerError {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum StorageAccess {
-    #[default]
     /// storages should be accessed by Mmap
     Mmap,
+    /// storages should be accessed by File I/O
     /// ancient storages are created by 1-shot write to pack multiple accounts together more efficiently with new formats
+    #[default]
     File,
 }
 
@@ -95,6 +99,15 @@ impl AccountsFile {
         match self {
             Self::AppendVec(av) => av.reopen_as_readonly().map(Self::AppendVec),
             Self::TieredStorage(_) => None,
+        }
+    }
+
+    /// Return the total number of bytes of the zero lamport single ref accounts in the storage.
+    /// Those bytes are "dead" and can be shrunk away.
+    pub(crate) fn dead_bytes_due_to_zero_lamport_single_ref(&self, count: usize) -> usize {
+        match self {
+            Self::AppendVec(av) => av.dead_bytes_due_to_zero_lamport_single_ref(count),
+            Self::TieredStorage(ts) => ts.dead_bytes_due_to_zero_lamport_single_ref(count),
         }
     }
 
@@ -219,6 +232,25 @@ impl AccountsFile {
                 }
             }
         }
+    }
+
+    /// Iterate over all accounts and call `callback` with each account.
+    /// Only intended to be used by Geyser.
+    pub fn scan_accounts_for_geyser(
+        &self,
+        mut callback: impl for<'local> FnMut(AccountForGeyser<'local>),
+    ) {
+        self.scan_accounts(|stored_account_meta| {
+            let account_for_geyser = AccountForGeyser {
+                pubkey: stored_account_meta.pubkey(),
+                lamports: stored_account_meta.lamports(),
+                owner: stored_account_meta.owner(),
+                executable: stored_account_meta.executable(),
+                rent_epoch: stored_account_meta.rent_epoch(),
+                data: stored_account_meta.data(),
+            };
+            callback(account_for_geyser)
+        })
     }
 
     /// for each offset in `sorted_offsets`, return the account size

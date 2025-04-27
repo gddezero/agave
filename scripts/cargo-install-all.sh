@@ -53,6 +53,10 @@ while [[ -n $1 ]]; do
       buildProfileArg='--profile release-with-debug'
       buildProfile='release-with-debug'
       shift
+    elif [[ $1 = --release-with-lto ]]; then
+      buildProfileArg='--profile release-with-lto'
+      buildProfile='release-with-lto'
+      shift
     elif [[ $1 = --validator-only ]]; then
       validatorOnly=true
       shift
@@ -219,8 +223,8 @@ if [[ -z "$validatorOnly" ]]; then
   "$cargo" $maybeRustVersion build --manifest-path programs/bpf_loader/gen-syscall-list/Cargo.toml
   # shellcheck disable=SC2086 # Don't want to double quote $rust_version
   "$cargo" $maybeRustVersion run --bin gen-headers
-  mkdir -p "$installDir"/bin/sdk/sbf
-  cp -a sdk/sbf/* "$installDir"/bin/sdk/sbf
+  mkdir -p "$installDir"/bin/platform-tools-sdk/sbf
+  cp -a platform-tools-sdk/sbf/* "$installDir"/bin/platform-tools-sdk/sbf
 fi
 
 (

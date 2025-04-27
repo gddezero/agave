@@ -1,12 +1,9 @@
 //! The `recvmmsg` module provides recvmmsg() API implementation
 
 pub use solana_perf::packet::NUM_RCVMMSGS;
-use {
-    crate::packet::{Meta, Packet},
-    std::{cmp, io, net::UdpSocket},
-};
 #[cfg(target_os = "linux")]
 use {
+    crate::msghdr::create_msghdr,
     itertools::izip,
     libc::{
         iovec, mmsghdr, msghdr, sockaddr_storage, socklen_t, AF_INET, AF_INET6, MSG_WAITFORONE,
@@ -17,6 +14,10 @@ use {
         os::unix::io::AsRawFd,
         ptr,
     },
+};
+use {
+    crate::packet::{Meta, Packet},
+    std::{cmp, io, net::UdpSocket},
 };
 
 #[cfg(not(target_os = "linux"))]
@@ -89,7 +90,7 @@ pub fn recv_mmsg(sock: &UdpSocket, packets: &mut [Packet]) -> io::Result</*num p
     }
     // Assert that there are no leftovers in packets.
     debug_assert!(packets.iter().all(|pkt| pkt.meta() == &Meta::default()));
-    const SOCKADDR_STORAGE_SIZE: usize = mem::size_of::<sockaddr_storage>();
+    const SOCKADDR_STORAGE_SIZE: socklen_t = mem::size_of::<sockaddr_storage>() as socklen_t;
 
     let mut iovs = [MaybeUninit::uninit(); NUM_RCVMMSGS];
     let mut addrs = [MaybeUninit::zeroed(); NUM_RCVMMSGS];
@@ -107,17 +108,11 @@ pub fn recv_mmsg(sock: &UdpSocket, packets: &mut [Packet]) -> io::Result</*num p
             iov_len: buffer.len(),
         });
 
+        let msg_hdr = create_msghdr(addr, SOCKADDR_STORAGE_SIZE, iov);
+
         hdr.write(mmsghdr {
             msg_len: 0,
-            msg_hdr: msghdr {
-                msg_name: addr.as_mut_ptr() as *mut _,
-                msg_namelen: SOCKADDR_STORAGE_SIZE as socklen_t,
-                msg_iov: iov.as_mut_ptr(),
-                msg_iovlen: 1,
-                msg_control: ptr::null::<libc::c_void>() as *mut _,
-                msg_controllen: 0,
-                msg_flags: 0,
-            },
+            msg_hdr,
         });
     }
 
@@ -178,6 +173,7 @@ pub fn recv_mmsg(sock: &UdpSocket, packets: &mut [Packet]) -> io::Result</*num p
 mod tests {
     use {
         crate::{packet::PACKET_DATA_SIZE, recvmmsg::*},
+        solana_net_utils::{bind_to, bind_to_localhost},
         std::{
             net::{SocketAddr, UdpSocket},
             time::{Duration, Instant},
@@ -187,9 +183,12 @@ mod tests {
     type TestConfig = (UdpSocket, SocketAddr, UdpSocket, SocketAddr);
 
     fn test_setup_reader_sender(ip_str: &str) -> io::Result<TestConfig> {
-        let reader = UdpSocket::bind(ip_str)?;
+        let sock_addr: SocketAddr = ip_str
+            .parse()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let reader = bind_to(sock_addr.ip(), sock_addr.port(), /*reuseport:*/ false)?;
         let addr = reader.local_addr()?;
-        let sender = UdpSocket::bind(ip_str)?;
+        let sender = bind_to(sock_addr.ip(), sock_addr.port(), /*reuseport:*/ false)?;
         let saddr = sender.local_addr()?;
         Ok((reader, addr, sender, saddr))
     }
@@ -259,11 +258,11 @@ mod tests {
 
     #[test]
     pub fn test_recv_mmsg_multi_iter_timeout() {
-        let reader = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let reader = bind_to_localhost().expect("bind");
         let addr = reader.local_addr().unwrap();
         reader.set_read_timeout(Some(Duration::new(5, 0))).unwrap();
         reader.set_nonblocking(false).unwrap();
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let sender = bind_to_localhost().expect("bind");
         let saddr = sender.local_addr().unwrap();
         let sent = TEST_NUM_MSGS;
         for _ in 0..sent {
@@ -290,14 +289,14 @@ mod tests {
 
     #[test]
     pub fn test_recv_mmsg_multi_addrs() {
-        let reader = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let reader = bind_to_localhost().expect("bind");
         let addr = reader.local_addr().unwrap();
 
-        let sender1 = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let sender1 = bind_to_localhost().expect("bind");
         let saddr1 = sender1.local_addr().unwrap();
         let sent1 = TEST_NUM_MSGS - 1;
 
-        let sender2 = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let sender2 = bind_to_localhost().expect("bind");
         let saddr2 = sender2.local_addr().unwrap();
         let sent2 = TEST_NUM_MSGS + 1;
 

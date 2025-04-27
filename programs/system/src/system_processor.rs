@@ -4,21 +4,21 @@ use {
         withdraw_nonce_account,
     },
     log::*,
+    solana_bincode::limited_deserialize,
+    solana_instruction::error::InstructionError,
     solana_log_collector::ic_msg,
+    solana_nonce as nonce,
     solana_program_runtime::{
         declare_process_instruction, invoke_context::InvokeContext,
         sysvar_cache::get_sysvar_with_account_check,
     },
-    solana_sdk::{
-        instruction::InstructionError,
-        nonce,
-        program_utils::limited_deserialize,
-        pubkey::Pubkey,
-        system_instruction::{SystemError, SystemInstruction, MAX_PERMITTED_DATA_LENGTH},
-        system_program,
-        transaction_context::{
-            BorrowedAccount, IndexOfAccount, InstructionContext, TransactionContext,
-        },
+    solana_pubkey::Pubkey,
+    solana_sdk_ids::system_program,
+    solana_system_interface::{
+        error::SystemError, instruction::SystemInstruction, MAX_PERMITTED_DATA_LENGTH,
+    },
+    solana_transaction_context::{
+        BorrowedAccount, IndexOfAccount, InstructionContext, TransactionContext,
     },
     std::collections::HashSet,
 };
@@ -302,7 +302,8 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
     let transaction_context = &invoke_context.transaction_context;
     let instruction_context = transaction_context.get_current_instruction_context()?;
     let instruction_data = instruction_context.get_instruction_data();
-    let instruction = limited_deserialize(instruction_data)?;
+    let instruction =
+        limited_deserialize(instruction_data, solana_packet::PACKET_DATA_SIZE as u64)?;
 
     trace!("process_instruction: {:?}", instruction);
 
@@ -479,7 +480,7 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
             if !nonce_account.is_writable() {
                 return Err(InstructionError::InvalidArgument);
             }
-            let nonce_versions: nonce::state::Versions = nonce_account.get_state()?;
+            let nonce_versions: nonce::versions::Versions = nonce_account.get_state()?;
             match nonce_versions.upgrade() {
                 None => Err(InstructionError::InvalidArgument),
                 Some(nonce_versions) => nonce_account.set_state(&nonce_versions),
@@ -565,8 +566,8 @@ mod tests {
     };
     use {
         super::*,
-        crate::{get_system_account_kind, SystemAccountKind},
         bincode::serialize,
+        solana_nonce_account::{get_system_account_kind, SystemAccountKind},
         solana_program_runtime::{
             invoke_context::mock_process_instruction, with_mock_invoke_context,
         },
@@ -1807,55 +1808,6 @@ mod tests {
             ),
             Err(InstructionError::InvalidAccountData),
         );
-    }
-
-    #[test]
-    fn test_get_system_account_kind_system_ok() {
-        let system_account = AccountSharedData::default();
-        assert_eq!(
-            get_system_account_kind(&system_account),
-            Some(SystemAccountKind::System)
-        );
-    }
-
-    #[test]
-    fn test_get_system_account_kind_nonce_ok() {
-        let nonce_account = AccountSharedData::new_data(
-            42,
-            &nonce::state::Versions::new(nonce::State::Initialized(nonce::state::Data::default())),
-            &system_program::id(),
-        )
-        .unwrap();
-        assert_eq!(
-            get_system_account_kind(&nonce_account),
-            Some(SystemAccountKind::Nonce)
-        );
-    }
-
-    #[test]
-    fn test_get_system_account_kind_uninitialized_nonce_account_fail() {
-        assert_eq!(
-            get_system_account_kind(&nonce_account::create_account(42).borrow()),
-            None
-        );
-    }
-
-    #[test]
-    fn test_get_system_account_kind_system_owner_nonzero_nonnonce_data_fail() {
-        let other_data_account =
-            AccountSharedData::new_data(42, b"other", &Pubkey::default()).unwrap();
-        assert_eq!(get_system_account_kind(&other_data_account), None);
-    }
-
-    #[test]
-    fn test_get_system_account_kind_nonsystem_owner_with_nonce_data_fail() {
-        let nonce_account = AccountSharedData::new_data(
-            42,
-            &nonce::state::Versions::new(nonce::State::Initialized(nonce::state::Data::default())),
-            &Pubkey::new_unique(),
-        )
-        .unwrap();
-        assert_eq!(get_system_account_kind(&nonce_account), None);
     }
 
     #[test]

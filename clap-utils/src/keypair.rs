@@ -19,21 +19,22 @@ use {
     clap::ArgMatches,
     rpassword::prompt_password,
     solana_derivation_path::{DerivationPath, DerivationPathError},
+    solana_hash::Hash,
+    solana_keypair::{
+        keypair_from_seed, keypair_from_seed_phrase_and_passphrase, read_keypair,
+        read_keypair_file, seed_derivable::keypair_from_seed_and_derivation_path, Keypair,
+    },
+    solana_message::Message,
+    solana_presigner::Presigner,
+    solana_pubkey::Pubkey,
     solana_remote_wallet::{
         locator::{Locator as RemoteWalletLocator, LocatorError as RemoteWalletLocatorError},
         remote_keypair::generate_remote_keypair,
         remote_wallet::{maybe_wallet_manager, RemoteWalletError, RemoteWalletManager},
     },
-    solana_sdk::{
-        hash::Hash,
-        message::Message,
-        pubkey::Pubkey,
-        signature::{
-            generate_seed_from_seed_phrase_and_passphrase, keypair_from_seed,
-            keypair_from_seed_and_derivation_path, keypair_from_seed_phrase_and_passphrase,
-            read_keypair, read_keypair_file, Keypair, NullSigner, Presigner, Signature, Signer,
-        },
-    },
+    solana_seed_phrase::generate_seed_from_seed_phrase_and_passphrase,
+    solana_signature::Signature,
+    solana_signer::{null_signer::NullSigner, Signer},
     std::{
         cell::RefCell,
         convert::TryFrom,
@@ -207,7 +208,7 @@ impl DefaultSigner {
     /// use clap::{App, Arg, value_t_or_exit};
     /// use solana_clap_utils::keypair::{DefaultSigner, signer_from_path};
     /// use solana_clap_utils::offline::OfflineArgs;
-    /// use solana_sdk::signer::Signer;
+    /// use solana_signer::Signer;
     ///
     /// let clap_app = App::new("my-program")
     ///     // The argument we'll parse as a signer "path"
@@ -567,7 +568,7 @@ pub struct SignerFromPathConfig {
 /// the following schemes are supported:
 ///
 /// - `file:` &mdash; Read the keypair from a JSON keypair file. The path portion
-///    of the URI is the file path.
+///   of the URI is the file path.
 ///
 /// - `stdin:` &mdash; Read the keypair from stdin, in the JSON format used by
 ///   the keypair file.
@@ -1123,8 +1124,9 @@ mod tests {
         crate::offline::OfflineArgs,
         assert_matches::assert_matches,
         clap::{value_t_or_exit, App, Arg},
+        solana_keypair::write_keypair_file,
         solana_remote_wallet::{locator::Manufacturer, remote_wallet::initialize_wallet_manager},
-        solana_sdk::{signer::keypair::write_keypair_file, system_instruction},
+        solana_system_interface::instruction::transfer,
         tempfile::{NamedTempFile, TempDir},
     };
 
@@ -1145,11 +1147,7 @@ mod tests {
         let nonsigner2 = Keypair::new();
         let recipient = Pubkey::new_unique();
         let message = Message::new(
-            &[system_instruction::transfer(
-                &source.pubkey(),
-                &recipient,
-                42,
-            )],
+            &[transfer(&source.pubkey(), &recipient, 42)],
             Some(&fee_payer.pubkey()),
         );
         let signers = vec![

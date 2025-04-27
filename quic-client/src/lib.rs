@@ -9,8 +9,8 @@ extern crate solana_metrics;
 use {
     crate::{
         nonblocking::quic_client::{
-            QuicClient, QuicClientCertificate,
-            QuicClientConnection as NonblockingQuicClientConnection, QuicLazyInitializedEndpoint,
+            QuicClient, QuicClientConnection as NonblockingQuicClientConnection,
+            QuicLazyInitializedEndpoint,
         },
         quic_client::QuicClientConnection as BlockingQuicClientConnection,
     },
@@ -22,11 +22,11 @@ use {
         },
         connection_cache_stats::ConnectionCacheStats,
     },
-    solana_sdk::{
-        pubkey::Pubkey,
-        signature::{Keypair, Signer},
-    },
-    solana_streamer::{streamer::StakedNodes, tls_certificates::new_dummy_x509_certificate},
+    solana_keypair::Keypair,
+    solana_pubkey::Pubkey,
+    solana_signer::Signer,
+    solana_streamer::streamer::StakedNodes,
+    solana_tls_utils::{new_dummy_x509_certificate, QuicClientCertificate},
     std::{
         net::{IpAddr, SocketAddr},
         sync::{Arc, RwLock},

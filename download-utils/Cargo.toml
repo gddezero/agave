@@ -10,12 +10,11 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
-console = { workspace = true }
-indicatif = { workspace = true }
 log = { workspace = true }
-reqwest = { workspace = true, features = ["blocking", "brotli", "deflate", "gzip", "rustls-tls", "json"] }
+solana-clock = { workspace = true }
+solana-file-download = { workspace = true }
+solana-genesis-config = { workspace = true }
 solana-runtime = { workspace = true }
-solana-sdk = { workspace = true }
 
 [dev-dependencies]
 solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }

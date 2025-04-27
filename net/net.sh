@@ -189,7 +189,7 @@ annotateBlockexplorerUrl() {
 }
 
 build() {
-  supported=("20.04")
+  supported=("22.04")
   declare MAYBE_DOCKER=
   if [[ $(uname) != Linux || ! " ${supported[*]} " =~ $(lsb_release -sr) ]]; then
     # shellcheck source=ci/docker/env.sh
@@ -282,7 +282,7 @@ syncScripts() {
   local remoteSolanaHome="${remoteHome}/solana"
   rsync -vPrc -e "ssh ${sshOptions[*]}" \
     --exclude 'net/log*' \
-    "$SOLANA_ROOT"/{fetch-perf-libs.sh,fetch-spl.sh,scripts,net,multinode-demo} \
+    "$SOLANA_ROOT"/{fetch-perf-libs.sh,fetch-programs.sh,fetch-core-bpf.sh,fetch-spl.sh,scripts,net,multinode-demo} \
     "$ipAddress":"$remoteSolanaHome"/ > /dev/null
 }
 

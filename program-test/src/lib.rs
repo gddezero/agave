@@ -4,6 +4,7 @@
 // Export tokio for test clients
 pub use tokio;
 use {
+    agave_feature_set::FEATURE_NAMES,
     async_trait::async_trait,
     base64::{prelude::BASE64_STANDARD, Engine},
     chrono_humanize::{Accuracy, HumanTime, Tense},
@@ -11,21 +12,22 @@ use {
     solana_accounts_db::epoch_accounts_hash::EpochAccountsHash,
     solana_banks_client::start_client,
     solana_banks_server::banks_server::start_local_server,
-    solana_bpf_loader_program::serialization::serialize_parameters,
     solana_compute_budget::compute_budget::ComputeBudget,
-    solana_feature_set::FEATURE_NAMES,
     solana_instruction::{error::InstructionError, Instruction},
     solana_log_collector::ic_msg,
     solana_program_runtime::{
-        invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry, stable_log,
+        invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry,
+        serialization::serialize_parameters, stable_log,
     },
     solana_runtime::{
-        accounts_background_service::{AbsRequestSender, SnapshotRequestKind},
+        accounts_background_service::SnapshotRequestKind,
         bank::Bank,
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
         genesis_utils::{create_genesis_config_with_leader_ex, GenesisConfigInfo},
         runtime_config::RuntimeConfig,
+        snapshot_config::SnapshotConfig,
+        snapshot_controller::SnapshotController,
     },
     solana_sdk::{
         account::{create_account_shared_data_for_test, Account, AccountSharedData},
@@ -69,11 +71,11 @@ pub use {
     solana_banks_client::{BanksClient, BanksClientError},
     solana_banks_interface::BanksTransactionResultWithMetadata,
     solana_program_runtime::invoke_context::InvokeContext,
-    solana_rbpf::{
+    solana_sbpf::{
         error::EbpfError,
         vm::{get_runtime_environment_key, EbpfVm},
     },
-    solana_sdk::transaction_context::IndexOfAccount,
+    solana_transaction_context::IndexOfAccount,
 };
 
 pub mod programs;
@@ -127,10 +129,14 @@ pub fn invoke_builtin_function(
     let deduplicated_indices: HashSet<IndexOfAccount> = instruction_account_indices.collect();
 
     // Serialize entrypoint parameters with SBF ABI
+    let mask_out_rent_epoch_in_vm_serialization = invoke_context
+        .get_feature_set()
+        .is_active(&agave_feature_set::mask_out_rent_epoch_in_vm_serialization::id());
     let (mut parameter_bytes, _regions, _account_lengths) = serialize_parameters(
         transaction_context,
         instruction_context,
         true, // copy_account_data // There is no VM so direct mapping can not be implemented here
+        mask_out_rent_epoch_in_vm_serialization,
     )?;
 
     // Deserialize data back into instruction params
@@ -218,7 +224,7 @@ fn get_sysvar<T: Default + Sysvar + Sized + serde::de::DeserializeOwned + Clone>
 ) -> u64 {
     let invoke_context = get_invoke_context();
     if invoke_context
-        .consume_checked(invoke_context.get_compute_budget().sysvar_base_cost + T::size_of() as u64)
+        .consume_checked(invoke_context.get_execution_cost().sysvar_base_cost + T::size_of() as u64)
         .is_err()
     {
         panic!("Exceeded compute budget");
@@ -497,7 +503,7 @@ impl Default for ProgramTest {
     ///
     fn default() -> Self {
         solana_logger::setup_with_default(
-            "solana_rbpf::vm=debug,\
+            "solana_sbpf::vm=debug,\
              solana_runtime::message_processor=debug,\
              solana_runtime::system_instruction_processor=trace,\
              solana_program_test=info",
@@ -815,7 +821,7 @@ impl ProgramTest {
             bootstrap_validator_stake_lamports,
             42,
             fee_rate_governor,
-            rent,
+            rent.clone(),
             ClusterType::Development,
             std::mem::take(&mut self.genesis_accounts),
         );
@@ -866,7 +872,16 @@ impl ProgramTest {
         );
 
         // Add commonly-used SPL programs as a convenience to the user
-        for (program_id, account) in programs::spl_programs(&Rent::default()).iter() {
+        for (program_id, account) in programs::spl_programs(&rent).iter() {
+            bank.store_account(program_id, account);
+        }
+
+        // Add migrated Core BPF programs.
+        for (program_id, account) in programs::core_bpf_programs(&rent, |feature_id| {
+            genesis_config.accounts.contains_key(feature_id)
+        })
+        .iter()
+        {
             bank.store_account(program_id, account);
         }
 
@@ -1162,10 +1177,18 @@ impl ProgramTestContext {
         };
 
         let (snapshot_request_sender, snapshot_request_receiver) = crossbeam_channel::unbounded();
-        let abs_request_sender = AbsRequestSender::new(snapshot_request_sender);
+        let snapshot_controller = SnapshotController::new(
+            snapshot_request_sender,
+            SnapshotConfig::new_disabled(),
+            bank_forks.root(),
+        );
 
         bank_forks
-            .set_root(pre_warp_slot, &abs_request_sender, Some(pre_warp_slot))
+            .set_root(
+                pre_warp_slot,
+                Some(&snapshot_controller),
+                Some(pre_warp_slot),
+            )
             .unwrap();
 
         // The call to `set_root()` above will send an EAH request.  Need to intercept and handle
@@ -1231,7 +1254,7 @@ impl ProgramTestContext {
         bank_forks
             .set_root(
                 pre_warp_slot,
-                &solana_runtime::accounts_background_service::AbsRequestSender::default(),
+                None, // snapshot_controller
                 Some(pre_warp_slot),
             )
             .unwrap();

@@ -6,29 +6,30 @@
 
 use {
     crate::{
-        cluster_info::Ping,
         cluster_info_metrics::GossipStats,
         contact_info::ContactInfo,
         crds::{Crds, GossipRoute},
+        crds_data::CrdsData,
         crds_gossip_error::CrdsGossipError,
-        crds_gossip_pull::{CrdsFilter, CrdsGossipPull, CrdsTimeouts, ProcessPullStats},
+        crds_gossip_pull::{
+            CrdsFilter, CrdsGossipPull, CrdsTimeouts, ProcessPullStats, PullRequest,
+        },
         crds_gossip_push::CrdsGossipPush,
-        crds_value::{CrdsData, CrdsValue},
+        crds_value::CrdsValue,
         duplicate_shred::{self, DuplicateShredIndex, MAX_DUPLICATE_SHREDS},
-        ping_pong::PingCache,
+        protocol::{Ping, PingCache},
     },
     itertools::Itertools,
     rand::{CryptoRng, Rng},
     rayon::ThreadPool,
+    solana_clock::Slot,
+    solana_hash::Hash,
+    solana_keypair::Keypair,
     solana_ledger::shred::Shred,
-    solana_sdk::{
-        clock::Slot,
-        hash::Hash,
-        pubkey::Pubkey,
-        signature::{Keypair, Signer},
-        timing::timestamp,
-    },
+    solana_pubkey::Pubkey,
+    solana_signer::Signer,
     solana_streamer::socket::SocketAddrSpace,
+    solana_time_utils::timestamp,
     std::{
         collections::{HashMap, HashSet},
         net::SocketAddr,
@@ -74,12 +75,15 @@ impl CrdsGossip {
         pubkey: &Pubkey, // This node.
         now: u64,
         stakes: &HashMap<Pubkey, u64>,
+        should_retain_crds_value: impl Fn(&CrdsValue) -> bool,
     ) -> (
-        HashMap<Pubkey, Vec<CrdsValue>>,
-        usize, // number of values
+        Vec<CrdsValue>, // unique CrdsValues pushed out to peers
+        // map of pubkeys to indices in Vec<CrdsValue> pushed to that peer
+        HashMap<Pubkey, Vec</*index:*/ usize>>,
         usize, // number of push messages
     ) {
-        self.push.new_push_messages(pubkey, &self.crds, now, stakes)
+        self.push
+            .new_push_messages(pubkey, &self.crds, now, stakes, should_retain_crds_value)
     }
 
     pub(crate) fn push_duplicate_shred<F>(
@@ -101,7 +105,7 @@ impl CrdsGossip {
         let mut crds = self.crds.write().unwrap();
         if crds
             .get_records(&pubkey)
-            .any(|value| match &value.value.data {
+            .any(|value| match value.value.data() {
                 CrdsData::DuplicateShred(_, value) => value.slot == shred_slot,
                 _ => false,
             })
@@ -121,7 +125,7 @@ impl CrdsGossip {
         let mut num_dup_shreds = 0;
         let offset = crds
             .get_records(&pubkey)
-            .filter_map(|value| match &value.value.data {
+            .filter_map(|value| match value.value.data() {
                 CrdsData::DuplicateShred(ix, value) => {
                     num_dup_shreds += 1;
                     Some((value.wallclock, *ix))
@@ -139,7 +143,7 @@ impl CrdsGossip {
         let entries = chunks.enumerate().map(|(k, chunk)| {
             let index = (offset + k as DuplicateShredIndex) % MAX_DUPLICATE_SHREDS;
             let data = CrdsData::DuplicateShred(index, chunk);
-            CrdsValue::new_signed(data, keypair)
+            CrdsValue::new(data, keypair)
         });
         let now = timestamp();
         for entry in entries {
@@ -209,7 +213,7 @@ impl CrdsGossip {
         ping_cache: &Mutex<PingCache>,
         pings: &mut Vec<(SocketAddr, Ping)>,
         socket_addr_space: &SocketAddrSpace,
-    ) -> Result<Vec<(ContactInfo, Vec<CrdsFilter>)>, CrdsGossipError> {
+    ) -> Result<impl Iterator<Item = (SocketAddr, CrdsFilter)> + Clone, CrdsGossipError> {
         self.pull.new_pull_request(
             thread_pool,
             &self.crds,
@@ -228,17 +232,19 @@ impl CrdsGossip {
     pub fn generate_pull_responses(
         &self,
         thread_pool: &ThreadPool,
-        filters: &[(CrdsValue, CrdsFilter)],
+        requests: &[PullRequest],
         output_size_limit: usize, // Limit number of crds values returned.
         now: u64,
+        should_retain_crds_value: impl Fn(&CrdsValue) -> bool + Sync,
         stats: &GossipStats,
     ) -> Vec<Vec<CrdsValue>> {
         CrdsGossipPull::generate_pull_responses(
             thread_pool,
             &self.crds,
-            filters,
+            requests,
             output_size_limit,
             now,
+            should_retain_crds_value,
             stats,
         )
     }
@@ -363,7 +369,7 @@ pub(crate) fn dedup_gossip_addresses(
 ) -> HashMap</*gossip:*/ SocketAddr, (/*stake:*/ u64, ContactInfo)> {
     nodes
         .into_iter()
-        .filter_map(|node| Some((node.gossip().ok()?, node)))
+        .filter_map(|node| Some((node.gossip()?, node)))
         .into_grouping_map()
         .aggregate(|acc, _node_gossip, node| {
             let stake = stakes.get(node.pubkey()).copied().unwrap_or_default();
@@ -385,17 +391,16 @@ pub(crate) fn maybe_ping_gossip_addresses<R: Rng + CryptoRng>(
     pings: &mut Vec<(SocketAddr, Ping)>,
 ) -> Vec<ContactInfo> {
     let mut ping_cache = ping_cache.lock().unwrap();
-    let mut pingf = move || Ping::new_rand(rng, keypair).ok();
     let now = Instant::now();
     nodes
         .into_iter()
         .filter(|node| {
-            let Ok(node_gossip) = node.gossip() else {
+            let Some(node_gossip) = node.gossip() else {
                 return false;
             };
             let (check, ping) = {
                 let node = (*node.pubkey(), node_gossip);
-                ping_cache.check(now, node, &mut pingf)
+                ping_cache.check(rng, keypair, now, node)
             };
             if let Some(ping) = ping {
                 pings.push((node_gossip, ping));
@@ -407,11 +412,7 @@ pub(crate) fn maybe_ping_gossip_addresses<R: Rng + CryptoRng>(
 
 #[cfg(test)]
 mod test {
-    use {
-        super::*,
-        crate::crds_value::CrdsData,
-        solana_sdk::{hash::hash, timing::timestamp},
-    };
+    use {super::*, solana_sha256_hasher::hash, solana_time_utils::timestamp};
 
     #[test]
     fn test_prune_errors() {
@@ -425,12 +426,14 @@ mod test {
             .write()
             .unwrap()
             .insert(
-                CrdsValue::new_unsigned(CrdsData::ContactInfo(ci.clone())),
+                CrdsValue::new_unsigned(CrdsData::from(&ci)),
                 0,
                 GossipRoute::LocalMessage,
             )
             .unwrap();
         let ping_cache = PingCache::new(
+            &mut rand::thread_rng(),
+            Instant::now(),
             Duration::from_secs(20 * 60),      // ttl
             Duration::from_secs(20 * 60) / 64, // rate_limit_delay
             128,                               // capacity

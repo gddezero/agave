@@ -13,6 +13,8 @@ use {
         account::{AccountSharedData, ReadableAccount, WritableAccount},
         account_utils::StateMut,
         pubkey::Pubkey,
+        reward_info::RewardInfo,
+        reward_type::RewardType,
         stake::state::{Delegation, StakeStateV2},
     },
     std::sync::atomic::Ordering::Relaxed,
@@ -156,13 +158,13 @@ impl Bank {
             )
         };
         account
-            .checked_add_lamports(partitioned_stake_reward.stake_reward_info.lamports as u64)
+            .checked_add_lamports(partitioned_stake_reward.stake_reward)
             .map_err(|_| DistributionError::ArithmeticOverflow)?;
         assert_eq!(
             stake
                 .delegation
                 .stake
-                .saturating_add(partitioned_stake_reward.stake_reward_info.lamports as u64),
+                .saturating_add(partitioned_stake_reward.stake_reward),
             partitioned_stake_reward.stake.delegation.stake,
         );
         account
@@ -172,11 +174,14 @@ impl Bank {
                 flags,
             ))
             .map_err(|_| DistributionError::UnableToSetState)?;
-        let mut stake_reward_info = partitioned_stake_reward.stake_reward_info;
-        stake_reward_info.post_balance = account.lamports();
         Ok(StakeReward {
             stake_pubkey: partitioned_stake_reward.stake_pubkey,
-            stake_reward_info,
+            stake_reward_info: RewardInfo {
+                reward_type: RewardType::Staking,
+                lamports: i64::try_from(partitioned_stake_reward.stake_reward).unwrap(),
+                post_balance: account.lamports(),
+                commission: Some(partitioned_stake_reward.commission),
+            },
             stake_account: account,
         })
     }
@@ -201,7 +206,7 @@ impl Bank {
         let stakes_cache_accounts = stakes_cache.stake_delegations();
         for partitioned_stake_reward in stake_rewards {
             let stake_pubkey = partitioned_stake_reward.stake_pubkey;
-            let reward_amount = partitioned_stake_reward.stake_reward_info.lamports as u64;
+            let reward_amount = partitioned_stake_reward.stake_reward;
             match Self::build_updated_stake_reward(stakes_cache_accounts, partitioned_stake_reward)
             {
                 Ok(stake_reward) => {
@@ -231,12 +236,15 @@ impl Bank {
 mod tests {
     use {
         super::*,
-        crate::bank::{
-            partitioned_epoch_rewards::{
-                epoch_rewards_hasher::hash_rewards_into_partitions, tests::convert_rewards,
-                REWARD_CALCULATION_NUM_BLOCKS,
+        crate::{
+            bank::{
+                partitioned_epoch_rewards::{
+                    epoch_rewards_hasher::hash_rewards_into_partitions, tests::convert_rewards,
+                    REWARD_CALCULATION_NUM_BLOCKS,
+                },
+                tests::create_genesis_config,
             },
-            tests::create_genesis_config,
+            inflation_rewards::points::PointValue,
         },
         rand::Rng,
         solana_accounts_db::stake_rewards::StakeReward,
@@ -254,7 +262,7 @@ mod tests {
             },
             sysvar,
         },
-        solana_stake_program::{points::PointValue, stake_state},
+        solana_stake_program::stake_state,
         solana_vote_program::vote_state,
     };
 
@@ -269,7 +277,8 @@ mod tests {
             .map(|_| PartitionedStakeReward::new_random())
             .collect::<Vec<_>>();
 
-        let stake_rewards = hash_rewards_into_partitions(stake_rewards, &Hash::new(&[1; 32]), 2);
+        let stake_rewards =
+            hash_rewards_into_partitions(stake_rewards, &Hash::new_from_array([1; 32]), 2);
 
         bank.set_epoch_reward_status_active(
             bank.block_height() + REWARD_CALCULATION_NUM_BLOCKS,
@@ -293,7 +302,7 @@ mod tests {
 
         let stake_rewards = hash_rewards_into_partitions(
             stake_rewards,
-            &Hash::new(&[1; 32]),
+            &Hash::new_from_array([1; 32]),
             bank.epoch_schedule().slots_per_epoch as usize + 1,
         );
 
@@ -347,15 +356,13 @@ mod tests {
         let (mut genesis_config, _mint_keypair) =
             create_genesis_config(1_000_000 * LAMPORTS_PER_SOL);
         genesis_config.epoch_schedule = EpochSchedule::custom(432000, 432000, false);
-        let mut bank = Bank::new_for_tests(&genesis_config);
-        bank.activate_feature(&solana_feature_set::partitioned_epoch_rewards_superfeature::id());
+        let bank = Bank::new_for_tests(&genesis_config);
 
         // Set up epoch_rewards sysvar with rewards with 1e9 lamports to distribute.
         let total_rewards = 1_000_000_000;
         let num_partitions = 2; // num_partitions is arbitrary and unimportant for this test
         let total_points = (total_rewards * 42) as u128; // total_points is arbitrary for the purposes of this test
         bank.create_epoch_rewards_sysvar(
-            total_rewards,
             0,
             42,
             num_partitions,
@@ -429,7 +436,7 @@ mod tests {
         let stake_rewards = convert_rewards(stake_rewards);
 
         let stake_rewards_bucket =
-            hash_rewards_into_partitions(stake_rewards, &Hash::new(&[1; 32]), 100);
+            hash_rewards_into_partitions(stake_rewards, &Hash::new_from_array([1; 32]), 100);
         bank.set_epoch_reward_status_active(
             bank.block_height() + REWARD_CALCULATION_NUM_BLOCKS,
             stake_rewards_bucket.clone(),
@@ -526,19 +533,15 @@ mod tests {
             },
             credits_observed: 42,
         };
-        let reward_amount = 100;
-        let stake_reward_info = RewardInfo {
-            reward_type: RewardType::Staking,
-            lamports: reward_amount,
-            post_balance: 0,
-            commission: None,
-        };
+        let stake_reward = 100;
+        let commission = 42;
 
         let nonexistent_account = Pubkey::new_unique();
         let partitioned_stake_reward = PartitionedStakeReward {
             stake_pubkey: nonexistent_account,
             stake: new_stake,
-            stake_reward_info,
+            stake_reward,
+            commission,
         };
         let stakes_cache = bank.stakes_cache.stakes();
         let stakes_cache_accounts = stakes_cache.stake_delegations();
@@ -553,7 +556,7 @@ mod tests {
 
         let overflowing_account = Pubkey::new_unique();
         let mut stake_account = AccountSharedData::new(
-            u64::MAX - reward_amount as u64 + 1,
+            u64::MAX - stake_reward + 1,
             StakeStateV2::size_of(),
             &solana_sdk::stake::program::id(),
         );
@@ -568,7 +571,8 @@ mod tests {
         let partitioned_stake_reward = PartitionedStakeReward {
             stake_pubkey: overflowing_account,
             stake: new_stake,
-            stake_reward_info,
+            stake_reward,
+            commission,
         };
         let stakes_cache = bank.stakes_cache.stakes();
         let stakes_cache_accounts = stakes_cache.stake_delegations();
@@ -580,7 +584,7 @@ mod tests {
         drop(stakes_cache);
 
         let successful_account = Pubkey::new_unique();
-        let starting_stake = new_stake.delegation.stake - reward_amount as u64;
+        let starting_stake = new_stake.delegation.stake - stake_reward;
         let starting_lamports = rent_exempt_reserve + starting_stake;
         let mut stake_account = AccountSharedData::new(
             starting_lamports,
@@ -606,11 +610,12 @@ mod tests {
         let partitioned_stake_reward = PartitionedStakeReward {
             stake_pubkey: successful_account,
             stake: new_stake,
-            stake_reward_info,
+            stake_reward,
+            commission,
         };
         let stakes_cache = bank.stakes_cache.stakes();
         let stakes_cache_accounts = stakes_cache.stake_delegations();
-        let expected_lamports = starting_lamports + stake_reward_info.lamports as u64;
+        let expected_lamports = starting_lamports + stake_reward;
         let mut expected_stake_account = AccountSharedData::new(
             expected_lamports,
             StakeStateV2::size_of(),
@@ -623,12 +628,15 @@ mod tests {
                 StakeFlags::default(),
             ))
             .unwrap();
-        let mut expected_reward_info = stake_reward_info;
-        expected_reward_info.post_balance = expected_lamports;
         let expected_stake_reward = StakeReward {
             stake_pubkey: successful_account,
             stake_account: expected_stake_account,
-            stake_reward_info: expected_reward_info,
+            stake_reward_info: RewardInfo {
+                reward_type: RewardType::Staking,
+                lamports: stake_reward as i64,
+                post_balance: expected_lamports,
+                commission: Some(commission),
+            },
         };
         assert_eq!(
             Bank::build_updated_stake_reward(stakes_cache_accounts, &partitioned_stake_reward)
@@ -665,8 +673,8 @@ mod tests {
 
         let expected_total = converted_rewards
             .iter()
-            .map(|stake_reward| stake_reward.stake_reward_info.lamports)
-            .sum::<i64>() as u64;
+            .map(|stake_reward| stake_reward.stake_reward)
+            .sum::<u64>();
 
         let DistributionResults {
             lamports_distributed,

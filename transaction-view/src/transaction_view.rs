@@ -1,12 +1,14 @@
 use {
     crate::{
         address_table_lookup_frame::AddressTableLookupIterator,
-        instructions_frame::InstructionsIterator, message_header_frame::TransactionVersion,
-        result::Result, sanitize::sanitize, transaction_data::TransactionData,
-        transaction_frame::TransactionFrame,
+        instructions_frame::InstructionsIterator, result::Result, sanitize::sanitize,
+        transaction_data::TransactionData, transaction_frame::TransactionFrame,
+        transaction_version::TransactionVersion,
     },
     core::fmt::{Debug, Formatter},
-    solana_sdk::{hash::Hash, pubkey::Pubkey, signature::Signature},
+    solana_hash::Hash,
+    solana_pubkey::Pubkey,
+    solana_signature::Signature,
     solana_svm_transaction::instruction::SVMInstruction,
 };
 
@@ -199,6 +201,27 @@ impl<D: TransactionData> TransactionView<true, D> {
         self.num_required_signatures()
             .wrapping_sub(self.num_readonly_signed_static_accounts())
     }
+
+    /// Return the total number of accounts in the transactions.
+    #[inline]
+    pub fn total_num_accounts(&self) -> u16 {
+        u16::from(self.num_static_account_keys())
+            .wrapping_add(self.total_writable_lookup_accounts())
+            .wrapping_add(self.total_readonly_lookup_accounts())
+    }
+
+    /// Return the number of requested writable keys.
+    #[inline]
+    pub fn num_requested_write_locks(&self) -> u64 {
+        u64::from(
+            u16::from(
+                (self.num_static_account_keys())
+                    .wrapping_sub(self.num_readonly_signed_static_accounts())
+                    .wrapping_sub(self.num_readonly_unsigned_static_accounts()),
+            )
+            .wrapping_add(self.total_writable_lookup_accounts()),
+        )
+    }
 }
 
 // Manual implementation of `Debug` - avoids bound on `D`.
@@ -220,13 +243,11 @@ impl<const SANITIZED: bool, D: TransactionData> Debug for TransactionView<SANITI
 mod tests {
     use {
         super::*,
-        solana_sdk::{
-            message::{Message, VersionedMessage},
-            pubkey::Pubkey,
-            signature::Signature,
-            system_instruction::{self},
-            transaction::VersionedTransaction,
-        },
+        solana_message::{Message, VersionedMessage},
+        solana_pubkey::Pubkey,
+        solana_signature::Signature,
+        solana_system_interface::instruction as system_instruction,
+        solana_transaction::versioned::VersionedTransaction,
     };
 
     fn verify_transaction_view_frame(tx: &VersionedTransaction) {

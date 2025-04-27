@@ -442,12 +442,14 @@ impl HeaviestSubtreeForkChoice {
         self.tree_root = root_parent;
     }
 
-    pub fn add_new_leaf_slot(&mut self, slot_hash_key: SlotHashKey, parent: Option<SlotHashKey>) {
+    pub fn maybe_print_state(&mut self) {
         if self.last_root_time.elapsed().as_secs() > MAX_ROOT_PRINT_SECONDS {
             self.print_state();
             self.last_root_time = Instant::now();
         }
+    }
 
+    pub fn add_new_leaf_slot(&mut self, slot_hash_key: SlotHashKey, parent: Option<SlotHashKey>) {
         if self.fork_infos.contains_key(&slot_hash_key) {
             // Can potentially happen if we repair the same version of the duplicate slot, after
             // dumping the original version
@@ -1031,10 +1033,8 @@ impl HeaviestSubtreeForkChoice {
                     {
                         assert!(if new_vote_slot == old_latest_vote_slot {
                             warn!(
-                                "Got a duplicate vote for
-                                    validator: {},
-                                    slot_hash: {:?}",
-                                pubkey, new_vote_slot_hash
+                                "Got a duplicate vote for validator: {pubkey}, \
+                                 slot_hash: {new_vote_slot_hash:?}",
                             );
                             // If the slots are equal, then the new
                             // vote must be for a smaller hash
@@ -1171,7 +1171,7 @@ impl HeaviestSubtreeForkChoice {
                         //
                         // In this scenario only 60% of the network has voted before the duplicate proof for Slot 1 and 1'
                         // was viewed. Neither version of the slot will reach the duplicate confirmed threshold, so it is
-                        // critical that a new fork Slot 2 from Slot 0 is created to allow the the validators on Slot 1 and
+                        // critical that a new fork Slot 2 from Slot 0 is created to allow the validators on Slot 1 and
                         // Slot 1' to switch. Since the `best_slot` is an ancestor of the last vote (Slot 0 is ancestor of last
                         // vote Slot 1 or Slot 1'), we will trigger `SwitchForkDecision::FailedSwitchDuplicateRollback`, which
                         // will create an alternate fork off of Slot 0. Once this alternate fork is created, the `best_slot`
@@ -1402,7 +1402,7 @@ impl<'a> AncestorIterator<'a> {
     }
 }
 
-impl<'a> Iterator for AncestorIterator<'a> {
+impl Iterator for AncestorIterator<'_> {
     type Item = SlotHashKey;
     fn next(&mut self) -> Option<Self::Item> {
         let parent_slot_hash_key = self
@@ -3519,7 +3519,7 @@ mod test {
             (vote_pubkeys[1], duplicate_leaves_descended_from_5[0]),
         ];
 
-        // The best slot should be the the smallest leaf descended from 4
+        // The best slot should be the smallest leaf descended from 4
         assert_eq!(
             heaviest_subtree_fork_choice.add_votes(
                 pubkey_votes.iter(),
@@ -3565,7 +3565,7 @@ mod test {
             ..,
         ) = setup_mark_invalid_forks_duplicate_tests();
 
-        // Marking candidate as valid again will choose the the heaviest leaf of
+        // Marking candidate as valid again will choose the heaviest leaf of
         // the newly valid branch
         let duplicate_slot = duplicate_leaves_descended_from_4[0].0;
         let duplicate_descendant = (duplicate_slot + 1, Hash::new_unique());

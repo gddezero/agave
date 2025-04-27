@@ -1,10 +1,11 @@
 #[allow(deprecated)]
-use solana_sdk::sysvar::recent_blockhashes;
+use solana_sysvar::recent_blockhashes;
 use {
     serde::{Deserialize, Serialize},
-    solana_sdk::{
-        clock::MAX_RECENT_BLOCKHASHES, fee_calculator::FeeCalculator, hash::Hash, timing::timestamp,
-    },
+    solana_clock::MAX_RECENT_BLOCKHASHES,
+    solana_fee_calculator::FeeCalculator,
+    solana_hash::Hash,
+    solana_time_utils::timestamp,
     std::collections::HashMap,
 };
 
@@ -26,7 +27,7 @@ impl HashInfo {
 #[cfg_attr(
     feature = "frozen-abi",
     derive(AbiExample),
-    frozen_abi(digest = "2GFWjonjAdte2KsJthPzFdSvVKJ4viKYTPzUHB8dzjtE")
+    frozen_abi(digest = "DZVVXt4saSgH1CWGrzBcX2sq5yswCuRqGx1Y1ZehtWT6")
 )]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockhashQueue {
@@ -36,7 +37,7 @@ pub struct BlockhashQueue {
     /// last hash to be registered
     last_hash: Option<Hash>,
 
-    hashes: HashMap<Hash, HashInfo>,
+    hashes: HashMap<Hash, HashInfo, ahash::RandomState>,
 
     /// hashes older than `max_age` will be dropped from the queue
     max_age: usize,
@@ -51,7 +52,7 @@ impl Default for BlockhashQueue {
 impl BlockhashQueue {
     pub fn new(max_age: usize) -> Self {
         Self {
-            hashes: HashMap::new(),
+            hashes: HashMap::default(),
             last_hash_index: 0,
             last_hash: None,
             max_age,
@@ -152,11 +153,10 @@ impl BlockhashQueue {
 #[cfg(test)]
 mod tests {
     #[allow(deprecated)]
-    use solana_sdk::sysvar::recent_blockhashes::IterItem;
+    use solana_sysvar::recent_blockhashes::IterItem;
     use {
-        super::*,
-        bincode::serialize,
-        solana_sdk::{clock::MAX_RECENT_BLOCKHASHES, hash::hash},
+        super::*, bincode::serialize, solana_clock::MAX_RECENT_BLOCKHASHES,
+        solana_sha256_hasher::hash,
     };
 
     #[test]

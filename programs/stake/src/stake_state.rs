@@ -5,32 +5,30 @@
 
 #[deprecated(
     since = "1.8.0",
-    note = "Please use `solana_sdk::stake::state` or `solana_program::stake::state` instead"
+    note = "Please use `solana_sdk::stake::state` or `solana_stake_interface::state` instead"
 )]
-pub use solana_sdk::stake::state::*;
+pub use solana_stake_interface::state::*;
 use {
-    solana_feature_set::FeatureSet,
+    agave_feature_set::FeatureSet,
+    solana_account::{state_traits::StateMut, AccountSharedData, ReadableAccount},
+    solana_clock::{Clock, Epoch},
+    solana_instruction::error::InstructionError,
     solana_log_collector::ic_msg,
     solana_program_runtime::invoke_context::InvokeContext,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount},
-        account_utils::StateMut,
-        clock::{Clock, Epoch},
-        instruction::{checked_add, InstructionError},
-        pubkey::Pubkey,
-        rent::Rent,
-        stake::{
-            instruction::{LockupArgs, StakeError},
-            program::id,
-            stake_flags::StakeFlags,
-            tools::{acceptable_reference_epoch_credits, eligible_for_deactivate_delinquent},
-        },
-        stake_history::{StakeHistory, StakeHistoryEntry},
-        transaction_context::{
-            BorrowedAccount, IndexOfAccount, InstructionContext, TransactionContext,
-        },
+    solana_pubkey::Pubkey,
+    solana_rent::Rent,
+    solana_sdk_ids::stake::id,
+    solana_stake_interface::{
+        error::StakeError,
+        instruction::LockupArgs,
+        stake_flags::StakeFlags,
+        tools::{acceptable_reference_epoch_credits, eligible_for_deactivate_delinquent},
     },
-    solana_vote_program::vote_state::{self, VoteState, VoteStateVersions},
+    solana_sysvar::stake_history::{StakeHistory, StakeHistoryEntry},
+    solana_transaction_context::{
+        BorrowedAccount, IndexOfAccount, InstructionContext, TransactionContext,
+    },
+    solana_vote_interface::state::{VoteState, VoteStateVersions},
     std::{collections::HashSet, convert::TryFrom},
 };
 
@@ -67,6 +65,10 @@ pub(crate) fn new_warmup_cooldown_rate_epoch(invoke_context: &InvokeContext) -> 
     invoke_context
         .get_feature_set()
         .new_warmup_cooldown_rate_epoch(epoch_schedule.as_ref())
+}
+
+fn checked_add(a: u64, b: u64) -> Result<u64, InstructionError> {
+    a.checked_add(b).ok_or(InstructionError::InsufficientFunds)
 }
 
 fn get_stake_status(
@@ -320,7 +322,7 @@ pub fn delegate(
 ) -> Result<(), InstructionError> {
     let vote_account = instruction_context
         .try_borrow_instruction_account(transaction_context, vote_account_index)?;
-    if *vote_account.get_owner() != solana_vote_program::id() {
+    if *vote_account.get_owner() != solana_sdk_ids::vote::id() {
         return Err(InstructionError::IncorrectProgramId);
     }
     let vote_pubkey = *vote_account.get_key();
@@ -872,24 +874,20 @@ pub fn withdraw(
         return Err(StakeError::LockupInForce.into());
     }
 
-    let lamports_and_reserve = checked_add(lamports, reserve)?;
-    // if the stake is active, we mustn't allow the account to go away
-    if is_staked // line coverage for branch coverage
-            && lamports_and_reserve > stake_account.get_lamports()
-    {
-        return Err(InstructionError::InsufficientFunds);
-    }
-
-    if lamports != stake_account.get_lamports() // not a full withdrawal
-            && lamports_and_reserve > stake_account.get_lamports()
-    {
-        assert!(!is_staked);
-        return Err(InstructionError::InsufficientFunds);
-    }
-
-    // Deinitialize state upon zero balance
     if lamports == stake_account.get_lamports() {
+        // if the stake is active, we mustn't allow the account to go away
+        if is_staked {
+            return Err(InstructionError::InsufficientFunds);
+        }
+
+        // Deinitialize state upon zero balance
         stake_account.set_state(&StakeStateV2::Uninitialized)?;
+    } else {
+        // Don't allow withdrawing the reserved rent balance or active stake
+        let lamports_and_reserve = checked_add(lamports, reserve)?;
+        if lamports_and_reserve > stake_account.get_lamports() {
+            return Err(InstructionError::InsufficientFunds);
+        }
     }
 
     stake_account.checked_sub_lamports(lamports)?;
@@ -914,7 +912,7 @@ pub(crate) fn deactivate_delinquent(
     )?;
     let delinquent_vote_account = instruction_context
         .try_borrow_instruction_account(transaction_context, delinquent_vote_account_index)?;
-    if *delinquent_vote_account.get_owner() != solana_vote_program::id() {
+    if *delinquent_vote_account.get_owner() != solana_sdk_ids::vote::id() {
         return Err(InstructionError::IncorrectProgramId);
     }
     let delinquent_vote_state = delinquent_vote_account
@@ -923,7 +921,7 @@ pub(crate) fn deactivate_delinquent(
 
     let reference_vote_account = instruction_context
         .try_borrow_instruction_account(transaction_context, reference_vote_account_index)?;
-    if *reference_vote_account.get_owner() != solana_vote_program::id() {
+    if *reference_vote_account.get_owner() != solana_sdk_ids::vote::id() {
         return Err(InstructionError::IncorrectProgramId);
     }
     let reference_vote_state = reference_vote_account
@@ -1418,7 +1416,7 @@ fn do_create_account(
 ) -> AccountSharedData {
     let mut stake_account = AccountSharedData::new(lamports, StakeStateV2::size_of(), &id());
 
-    let vote_state = vote_state::from(vote_account).expect("vote_state");
+    let vote_state = VoteState::deserialize(vote_account.data()).expect("vote_state");
 
     let rent_exempt_reserve = rent.minimum_balance(stake_account.data().len());
 
@@ -1447,20 +1445,19 @@ mod tests {
     use {
         super::*,
         proptest::prelude::*,
+        solana_account::{create_account_shared_data_for_test, AccountSharedData},
+        solana_epoch_schedule::EpochSchedule,
         solana_program_runtime::with_mock_invoke_context,
-        solana_sdk::{
-            account::{create_account_shared_data_for_test, AccountSharedData},
-            epoch_schedule::EpochSchedule,
-            pubkey::Pubkey,
-            stake::state::warmup_cooldown_rate,
-            sysvar::{epoch_schedule, SysvarId},
-        },
+        solana_pubkey::Pubkey,
+        solana_sdk_ids::sysvar::epoch_schedule,
+        solana_stake_interface::state::warmup_cooldown_rate,
+        solana_sysvar_id::SysvarId,
         test_case::test_case,
     };
 
     #[test]
     fn test_authorized_authorize() {
-        let staker = solana_sdk::pubkey::new_rand();
+        let staker = solana_pubkey::new_rand();
         let mut authorized = Authorized::auto(&staker);
         let mut signers = HashSet::new();
         assert_eq!(
@@ -1476,9 +1473,9 @@ mod tests {
 
     #[test]
     fn test_authorized_authorize_with_custodian() {
-        let staker = solana_sdk::pubkey::new_rand();
-        let custodian = solana_sdk::pubkey::new_rand();
-        let invalid_custodian = solana_sdk::pubkey::new_rand();
+        let staker = solana_pubkey::new_rand();
+        let custodian = solana_pubkey::new_rand();
+        let invalid_custodian = solana_pubkey::new_rand();
         let mut authorized = Authorized::auto(&staker);
         let mut signers = HashSet::new();
         signers.insert(staker);
@@ -2174,7 +2171,7 @@ mod tests {
 
     #[test]
     fn test_lockup_is_expired() {
-        let custodian = solana_sdk::pubkey::new_rand();
+        let custodian = solana_pubkey::new_rand();
         let lockup = Lockup {
             epoch: 1,
             unix_timestamp: 1,
@@ -2235,7 +2232,7 @@ mod tests {
         panic!(
             "stake minimum_balance: {} lamports, {} SOL",
             minimum_balance,
-            minimum_balance as f64 / solana_sdk::native_token::LAMPORTS_PER_SOL as f64
+            minimum_balance as f64 / solana_native_token::LAMPORTS_PER_SOL as f64
         );
     }
 

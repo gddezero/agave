@@ -16,3 +16,9 @@ solana-sbf-rust-realloc-dep = { workspace = true }
 
 [lib]
 crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[features]
+dynamic-frames = []

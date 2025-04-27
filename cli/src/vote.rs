@@ -14,6 +14,7 @@ use {
         stake::check_current_authority,
     },
     clap::{value_t_or_exit, App, Arg, ArgMatches, SubCommand},
+    solana_account::Account,
     solana_clap_utils::{
         compute_budget::{compute_unit_price_arg, ComputeUnitLimit, COMPUTE_UNIT_PRICE_ARG},
         fee_payer::{fee_payer_arg, FEE_PAYER_ARG},
@@ -28,15 +29,16 @@ use {
         return_signers_with_config, CliEpochVotingHistory, CliLandedVote, CliVoteAccount,
         ReturnSignersConfig,
     },
+    solana_commitment_config::CommitmentConfig,
+    solana_message::Message,
+    solana_native_token::lamports_to_sol,
+    solana_pubkey::Pubkey,
     solana_remote_wallet::remote_wallet::RemoteWalletManager,
     solana_rpc_client::rpc_client::RpcClient,
     solana_rpc_client_api::config::RpcGetVoteAccountsConfig,
     solana_rpc_client_nonce_utils::blockhash_query::BlockhashQuery,
-    solana_sdk::{
-        account::Account, commitment_config::CommitmentConfig, message::Message,
-        native_token::lamports_to_sol, pubkey::Pubkey, system_instruction::SystemError,
-        transaction::Transaction,
-    },
+    solana_system_interface::error::SystemError,
+    solana_transaction::Transaction,
     solana_vote_program::{
         vote_error::VoteError,
         vote_instruction::{self, withdraw, CreateVoteAccountConfig},
@@ -934,7 +936,11 @@ pub fn process_create_vote_account(
         )
     } else {
         tx.try_sign(&config.signers, recent_blockhash)?;
-        let result = rpc_client.send_and_confirm_transaction_with_spinner(&tx);
+        let result = rpc_client.send_and_confirm_transaction_with_spinner_and_config(
+            &tx,
+            config.commitment,
+            config.send_transaction_config,
+        );
         log_instruction_custom_error::<SystemError>(result, config)
     }
 }
@@ -1073,7 +1079,11 @@ pub fn process_vote_authorize(
             &tx.message,
             config.commitment,
         )?;
-        let result = rpc_client.send_and_confirm_transaction_with_spinner(&tx);
+        let result = rpc_client.send_and_confirm_transaction_with_spinner_and_config(
+            &tx,
+            config.commitment,
+            config.send_transaction_config,
+        );
         log_instruction_custom_error::<VoteError>(result, config)
     }
 }
@@ -1157,7 +1167,11 @@ pub fn process_vote_update_validator(
             &tx.message,
             config.commitment,
         )?;
-        let result = rpc_client.send_and_confirm_transaction_with_spinner(&tx);
+        let result = rpc_client.send_and_confirm_transaction_with_spinner_and_config(
+            &tx,
+            config.commitment,
+            config.send_transaction_config,
+        );
         log_instruction_custom_error::<VoteError>(result, config)
     }
 }
@@ -1234,7 +1248,11 @@ pub fn process_vote_update_commission(
             &tx.message,
             config.commitment,
         )?;
-        let result = rpc_client.send_and_confirm_transaction_with_spinner(&tx);
+        let result = rpc_client.send_and_confirm_transaction_with_spinner_and_config(
+            &tx,
+            config.commitment,
+            config.send_transaction_config,
+        );
         log_instruction_custom_error::<VoteError>(result, config)
     }
 }
@@ -1280,7 +1298,7 @@ pub fn process_show_vote_account(
 
     let epoch_schedule = rpc_client.get_epoch_schedule()?;
     let tvc_activation_slot =
-        rpc_client.get_feature_activation_slot(&solana_feature_set::timely_vote_credits::id())?;
+        rpc_client.get_feature_activation_slot(&agave_feature_set::timely_vote_credits::id())?;
     let tvc_activation_epoch = tvc_activation_slot.map(|s| epoch_schedule.get_epoch(s));
 
     let mut votes: Vec<CliLandedVote> = vec![];
@@ -1452,7 +1470,11 @@ pub fn process_withdraw_from_vote_account(
             &tx.message,
             config.commitment,
         )?;
-        let result = rpc_client.send_and_confirm_transaction_with_spinner(&tx);
+        let result = rpc_client.send_and_confirm_transaction_with_spinner_and_config(
+            &tx,
+            config.commitment,
+            config.send_transaction_config,
+        );
         log_instruction_custom_error::<VoteError>(result, config)
     }
 }
@@ -1516,7 +1538,11 @@ pub fn process_close_vote_account(
         &tx.message,
         config.commitment,
     )?;
-    let result = rpc_client.send_and_confirm_transaction_with_spinner(&tx);
+    let result = rpc_client.send_and_confirm_transaction_with_spinner_and_config(
+        &tx,
+        config.commitment,
+        config.send_transaction_config,
+    );
     log_instruction_custom_error::<VoteError>(result, config)
 }
 
@@ -1525,12 +1551,11 @@ mod tests {
     use {
         super::*,
         crate::{clap_app::get_clap_app, cli::parse_command},
+        solana_hash::Hash,
+        solana_keypair::{read_keypair_file, write_keypair, Keypair},
+        solana_presigner::Presigner,
         solana_rpc_client_nonce_utils::blockhash_query,
-        solana_sdk::{
-            hash::Hash,
-            signature::{read_keypair_file, write_keypair, Keypair, Signer},
-            signer::presigner::Presigner,
-        },
+        solana_signer::Signer,
         tempfile::NamedTempFile,
     };
 
@@ -1967,7 +1992,7 @@ mod tests {
         );
 
         // test init with an authed voter
-        let authed = solana_sdk::pubkey::new_rand();
+        let authed = solana_pubkey::new_rand();
         let (keypair_file, mut tmp_file) = make_tmp_file();
         let keypair = Keypair::new();
         write_keypair(&keypair, tmp_file.as_file_mut()).unwrap();

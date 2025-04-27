@@ -5,25 +5,26 @@ use {
             AccountStorageEntry, AccountsAddRootTiming, AccountsDb, LoadHint, LoadedAccount,
             ScanAccountStorageData, ScanStorageResult, VerifyAccountsHashAndLamportsConfig,
         },
-        accounts_index::{IndexKey, ScanConfig, ScanError, ScanResult},
+        accounts_index::{IndexKey, ScanConfig, ScanError, ScanOrder, ScanResult},
         ancestors::Ancestors,
         storable_accounts::StorableAccounts,
     },
     dashmap::DashMap,
     log::*,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount},
-        address_lookup_table::{self, error::AddressLookupError, state::AddressLookupTable},
-        clock::{BankId, Slot},
-        message::v0::LoadedAddresses,
-        pubkey::Pubkey,
-        slot_hashes::SlotHashes,
-        transaction::{Result, SanitizedTransaction},
-        transaction_context::TransactionAccount,
+    solana_account::{AccountSharedData, ReadableAccount},
+    solana_address_lookup_table_interface::{
+        self as address_lookup_table, error::AddressLookupError, state::AddressLookupTable,
     },
+    solana_clock::{BankId, Slot},
+    solana_message::v0::LoadedAddresses,
+    solana_pubkey::Pubkey,
+    solana_slot_hashes::SlotHashes,
     solana_svm_transaction::{
         message_address_table_lookup::SVMMessageAddressTableLookup, svm_message::SVMMessage,
     },
+    solana_transaction::sanitized::SanitizedTransaction,
+    solana_transaction_context::TransactionAccount,
+    solana_transaction_error::TransactionResult as Result,
     std::{
         cmp::Reverse,
         collections::{BinaryHeap, HashSet},
@@ -260,6 +261,11 @@ impl Accounts {
         if num == 0 {
             return Ok(vec![]);
         }
+        let scan_order = if sort_results {
+            ScanOrder::Sorted
+        } else {
+            ScanOrder::Unsorted
+        };
         let mut account_balances = BinaryHeap::new();
         self.accounts_db.scan_accounts(
             ancestors,
@@ -289,7 +295,7 @@ impl Accounts {
                     account_balances.push(Reverse((account.lamports(), *pubkey)));
                 }
             },
-            &ScanConfig::new(!sort_results),
+            &ScanConfig::new(scan_order),
         )?;
         Ok(account_balances
             .into_sorted_vec()
@@ -484,6 +490,11 @@ impl Accounts {
         bank_id: BankId,
         sort_results: bool,
     ) -> ScanResult<Vec<PubkeyAccountSlot>> {
+        let scan_order = if sort_results {
+            ScanOrder::Sorted
+        } else {
+            ScanOrder::Unsorted
+        };
         let mut collector = Vec::new();
         self.accounts_db
             .scan_accounts(
@@ -496,7 +507,7 @@ impl Accounts {
                         collector.push((*pubkey, account, slot))
                     }
                 },
-                &ScanConfig::new(!sort_results),
+                &ScanConfig::new(scan_order),
             )
             .map(|_| collector)
     }
@@ -511,12 +522,13 @@ impl Accounts {
     where
         F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
     {
-        self.accounts_db.scan_accounts(
-            ancestors,
-            bank_id,
-            scan_func,
-            &ScanConfig::new(!sort_results),
-        )
+        let scan_order = if sort_results {
+            ScanOrder::Sorted
+        } else {
+            ScanOrder::Unsorted
+        };
+        self.accounts_db
+            .scan_accounts(ancestors, bank_id, scan_func, &ScanConfig::new(scan_order))
     }
 
     pub fn hold_range_in_memory<R>(
@@ -551,6 +563,7 @@ impl Accounts {
     /// Slow because lock is held for 1 operation instead of many.
     /// WARNING: This noncached version is only to be used for tests/benchmarking
     /// as bypassing the cache in general is not supported
+    #[cfg(feature = "dev-context-only-utils")]
     pub fn store_slow_uncached(&self, slot: Slot, pubkey: &Pubkey, account: &AccountSharedData) {
         self.accounts_db.store_uncached(slot, &[(pubkey, account)]);
     }
@@ -652,16 +665,18 @@ impl Accounts {
 mod tests {
     use {
         super::*,
-        solana_sdk::{
-            account::{AccountSharedData, WritableAccount},
-            address_lookup_table::state::LookupTableMeta,
-            hash::Hash,
-            instruction::CompiledInstruction,
-            message::{v0::MessageAddressTableLookup, Message, MessageHeader},
-            native_loader,
-            signature::{signers::Signers, Keypair, Signer},
-            transaction::{Transaction, TransactionError, MAX_TX_ACCOUNT_LOCKS},
+        solana_account::{AccountSharedData, WritableAccount},
+        solana_address_lookup_table_interface::state::LookupTableMeta,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
+        solana_message::{
+            compiled_instruction::CompiledInstruction, v0::MessageAddressTableLookup, Message,
+            MessageHeader,
         },
+        solana_sdk_ids::native_loader,
+        solana_signer::{signers::Signers, Signer},
+        solana_transaction::{sanitized::MAX_TX_ACCOUNT_LOCKS, Transaction},
+        solana_transaction_error::TransactionError,
         std::{
             borrow::Cow,
             iter,
@@ -705,8 +720,7 @@ mod tests {
         // use bins * 2 to get the first half of the range within bin 0
         let bins_2 = bins * 2;
         let binner = crate::pubkey_bins::PubkeyBinCalculator24::new(bins_2);
-        let range2 =
-            binner.lowest_pubkey_from_bin(0, bins_2)..binner.lowest_pubkey_from_bin(1, bins_2);
+        let range2 = binner.lowest_pubkey_from_bin(0)..binner.lowest_pubkey_from_bin(1);
         let range2_inclusive = range2.start..=range2.end;
         assert_eq!(0, idx.bin_calculator.bin_from_pubkey(&range2.start));
         assert_eq!(0, idx.bin_calculator.bin_from_pubkey(&range2.end));
@@ -866,13 +880,13 @@ mod tests {
         let accounts = Accounts::new(Arc::new(accounts_db));
 
         // Load accounts owned by various programs into AccountsDb
-        let pubkey0 = solana_sdk::pubkey::new_rand();
+        let pubkey0 = solana_pubkey::new_rand();
         let account0 = AccountSharedData::new(1, 0, &Pubkey::from([2; 32]));
         accounts.store_slow_uncached(0, &pubkey0, &account0);
-        let pubkey1 = solana_sdk::pubkey::new_rand();
+        let pubkey1 = solana_pubkey::new_rand();
         let account1 = AccountSharedData::new(1, 0, &Pubkey::from([2; 32]));
         accounts.store_slow_uncached(0, &pubkey1, &account1);
-        let pubkey2 = solana_sdk::pubkey::new_rand();
+        let pubkey2 = solana_pubkey::new_rand();
         let account2 = AccountSharedData::new(1, 0, &Pubkey::from([3; 32]));
         accounts.store_slow_uncached(0, &pubkey2, &account2);
 
@@ -882,14 +896,6 @@ mod tests {
         assert_eq!(loaded, vec![(pubkey2, account2)]);
         let loaded = accounts.load_by_program_slot(0, Some(&Pubkey::from([4; 32])));
         assert_eq!(loaded, vec![]);
-    }
-
-    #[test]
-    fn test_accounts_empty_bank_hash_stats() {
-        let accounts_db = AccountsDb::new_single_for_tests();
-        let accounts = Accounts::new(Arc::new(accounts_db));
-        assert!(accounts.accounts_db.get_bank_hash_stats(0).is_some());
-        assert!(accounts.accounts_db.get_bank_hash_stats(1).is_none());
     }
 
     #[test]
@@ -1115,7 +1121,7 @@ mod tests {
                 .lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
             for result in results.iter() {
                 if result.is_ok() {
-                    counter_clone.clone().fetch_add(1, Ordering::SeqCst);
+                    counter_clone.clone().fetch_add(1, Ordering::Release);
                 }
             }
             accounts_clone.unlock_accounts(txs.iter().zip(&results));
@@ -1130,9 +1136,9 @@ mod tests {
                 .clone()
                 .lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
             if results[0].is_ok() {
-                let counter_value = counter_clone.clone().load(Ordering::SeqCst);
+                let counter_value = counter_clone.clone().load(Ordering::Acquire);
                 thread::sleep(time::Duration::from_millis(50));
-                assert_eq!(counter_value, counter_clone.clone().load(Ordering::SeqCst));
+                assert_eq!(counter_value, counter_clone.clone().load(Ordering::Acquire));
             }
             accounts_arc.unlock_accounts(txs.iter().zip(&results));
             thread::sleep(time::Duration::from_millis(50));
@@ -1300,7 +1306,7 @@ mod tests {
         let zero_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
         info!("storing..");
         for i in 0..2_000 {
-            let pubkey = solana_sdk::pubkey::new_rand();
+            let pubkey = solana_pubkey::new_rand();
             let account = AccountSharedData::new(i + 1, 0, AccountSharedData::default().owner());
             accounts.store_for_tests(i, &pubkey, &account);
             accounts.store_for_tests(i, &old_pubkey, &zero_account);
@@ -1539,10 +1545,12 @@ mod tests {
     #[test]
     fn test_maybe_abort_scan() {
         assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &ScanConfig::default()).is_ok());
-        assert!(
-            Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &ScanConfig::new(false)).is_ok()
-        );
-        let config = ScanConfig::new(false).recreate_with_abort();
+        assert!(Accounts::maybe_abort_scan(
+            ScanResult::Ok(vec![]),
+            &ScanConfig::new(ScanOrder::Sorted)
+        )
+        .is_ok());
+        let config = ScanConfig::new(ScanOrder::Sorted).recreate_with_abort();
         assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &config).is_ok());
         config.abort();
         assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &config).is_err());

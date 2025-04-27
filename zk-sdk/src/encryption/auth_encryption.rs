@@ -2,6 +2,8 @@
 //!
 //! This module is a simple wrapper of the `Aes128GcmSiv` implementation specialized for SPL
 //! token-2022 where the plaintext is always `u64`.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 use {
     crate::{
         encryption::{AE_CIPHERTEXT_LEN, AE_KEY_LEN},
@@ -25,13 +27,10 @@ use {
     sha3::Digest,
     sha3::Sha3_512,
     solana_derivation_path::DerivationPath,
-    solana_sdk::{
-        signature::Signature,
-        signer::{
-            keypair::generate_seed_from_seed_phrase_and_passphrase, EncodableKey, SeedDerivable,
-            Signer, SignerError,
-        },
-    },
+    solana_seed_derivable::SeedDerivable,
+    solana_seed_phrase::generate_seed_from_seed_phrase_and_passphrase,
+    solana_signature::Signature,
+    solana_signer::{EncodableKey, Signer, SignerError},
     std::{
         error,
         io::{Read, Write},
@@ -88,12 +87,15 @@ impl AuthenticatedEncryption {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Debug, Zeroize, Eq, PartialEq)]
 pub struct AeKey([u8; AE_KEY_LEN]);
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl AeKey {
     /// Generates a random authenticated encryption key.
     ///
     /// This function is randomized. It internally samples a scalar element using `OsRng`.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = newRand))]
     pub fn new_rand() -> Self {
         AuthenticatedEncryption::keygen()
     }
@@ -243,6 +245,7 @@ type Nonce = [u8; NONCE_LEN];
 type Ciphertext = [u8; CIPHERTEXT_LEN];
 
 /// Authenticated encryption nonce and ciphertext
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AeCiphertext {
     nonce: Nonce,
@@ -281,8 +284,8 @@ impl fmt::Display for AeCiphertext {
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::null_signer::NullSigner},
+        super::*, solana_keypair::Keypair, solana_pubkey::Pubkey,
+        solana_signer::null_signer::NullSigner,
     };
 
     #[test]

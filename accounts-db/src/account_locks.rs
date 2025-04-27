@@ -2,11 +2,10 @@
 use qualifier_attr::qualifiers;
 use {
     ahash::{AHashMap, AHashSet},
-    solana_sdk::{
-        message::AccountKeys,
-        pubkey::Pubkey,
-        transaction::{TransactionError, MAX_TX_ACCOUNT_LOCKS},
-    },
+    solana_message::AccountKeys,
+    solana_pubkey::Pubkey,
+    solana_transaction::sanitized::MAX_TX_ACCOUNT_LOCKS,
+    solana_transaction_error::TransactionError,
     std::{cell::RefCell, collections::hash_map},
 };
 
@@ -62,9 +61,7 @@ impl AccountLocks {
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     fn is_locked_readonly(&self, key: &Pubkey) -> bool {
-        self.readonly_locks
-            .get(key)
-            .map_or(false, |count| *count > 0)
+        self.readonly_locks.get(key).is_some_and(|count| *count > 0)
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
@@ -158,7 +155,7 @@ fn has_duplicates(account_keys: AccountKeys) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, solana_sdk::message::v0::LoadedAddresses};
+    use {super::*, solana_message::v0::LoadedAddresses};
 
     #[test]
     fn test_account_locks() {

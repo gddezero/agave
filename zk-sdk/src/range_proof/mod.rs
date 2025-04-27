@@ -75,14 +75,14 @@ pub const RANGE_PROOF_U256_LEN: usize =
 #[cfg(not(target_os = "solana"))]
 #[derive(Clone)]
 pub struct RangeProof {
-    pub A: CompressedRistretto,       // 32 bytes
-    pub S: CompressedRistretto,       // 32 bytes
-    pub T_1: CompressedRistretto,     // 32 bytes
-    pub T_2: CompressedRistretto,     // 32 bytes
-    pub t_x: Scalar,                  // 32 bytes
-    pub t_x_blinding: Scalar,         // 32 bytes
-    pub e_blinding: Scalar,           // 32 bytes
-    pub ipp_proof: InnerProductProof, // 448 bytes for withdraw; 512 for transfer
+    pub(crate) A: CompressedRistretto,       // 32 bytes
+    pub(crate) S: CompressedRistretto,       // 32 bytes
+    pub(crate) T_1: CompressedRistretto,     // 32 bytes
+    pub(crate) T_2: CompressedRistretto,     // 32 bytes
+    pub(crate) t_x: Scalar,                  // 32 bytes
+    pub(crate) t_x_blinding: Scalar,         // 32 bytes
+    pub(crate) e_blinding: Scalar,           // 32 bytes
+    pub(crate) ipp_proof: InnerProductProof, // 448 bytes for withdraw; 512 for transfer
 }
 
 #[allow(non_snake_case)]
@@ -255,7 +255,7 @@ impl RangeProof {
         let w = transcript.challenge_scalar(b"w");
         let Q = w * &(*G);
 
-        let G_factors: Vec<Scalar> = iter::repeat(Scalar::ONE).take(nm).collect();
+        let G_factors: Vec<Scalar> = iter::repeat_n(Scalar::ONE, nm).collect();
         let H_factors: Vec<Scalar> = util::exp_iter(y.invert()).take(nm).collect();
 
         // generate challenge `c` for consistency with the verifier's transcript

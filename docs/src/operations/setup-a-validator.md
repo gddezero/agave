@@ -308,10 +308,8 @@ not start without the settings below.
 
 ```bash
 sudo bash -c "cat >/etc/sysctl.d/21-agave-validator.conf <<EOF
-# Increase UDP buffer sizes
-net.core.rmem_default = 134217728
+# Increase max UDP buffer sizes
 net.core.rmem_max = 134217728
-net.core.wmem_default = 134217728
 net.core.wmem_max = 134217728
 
 # Increase memory mapped files limit
@@ -447,7 +445,7 @@ Test that your `validator.sh` file is running properly by executing the
 ```
 
 The script should execute the `agave-validator` process. In a new terminal
-window, shh into your server, then verify that the process is running:
+window, ssh into your server, then verify that the process is running:
 
 ```
 ps aux | grep agave-validator

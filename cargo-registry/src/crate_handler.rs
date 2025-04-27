@@ -1,6 +1,6 @@
 use {
     crate::{
-        client::{Client, RPCCommandConfig},
+        client::Client,
         sparse_index::{IndexEntry, RegistryIndex},
     },
     flate2::{
@@ -12,12 +12,10 @@ use {
     serde_derive::{Deserialize, Serialize},
     serde_json::from_slice,
     sha2::{Digest, Sha256},
-    solana_cli::program_v4::{process_deploy_program, process_dump, read_and_verify_elf},
-    solana_sdk::{
-        pubkey::Pubkey,
-        signature::{Keypair, Signer},
-        signer::EncodableKey,
-    },
+    solana_cli::program_v4::{process_deploy_program, process_dump, AdditionalCliConfig},
+    solana_keypair::Keypair,
+    solana_pubkey::Pubkey,
+    solana_signer::{EncodableKey, Signer},
     std::{
         collections::BTreeMap,
         fs,
@@ -109,9 +107,14 @@ impl Program {
         if self.id != signer.pubkey() {
             return Err("Signer doesn't match program ID".into());
         }
+        let mut cli_config = client.get_cli_config();
+        cli_config.signers.push(signer);
 
-        let mut program_data = read_and_verify_elf(self.path.as_ref(), &client.rpc_client)
-            .map_err(|e| format!("failed to read the program: {}", e))?;
+        let mut file = fs::File::open(&self.path)
+            .map_err(|err| format!("Unable to open program file: {err}"))?;
+        let mut program_data = Vec::new();
+        file.read_to_end(&mut program_data)
+            .map_err(|err| format!("Unable to read program file: {err}"))?;
 
         if APPEND_CRATE_TO_ELF {
             let program_id_str = Program::program_id_to_crate_name(self.id);
@@ -121,15 +124,17 @@ impl Program {
             program_data.extend_from_slice(&crate_tar_gz.0);
             program_data.extend_from_slice(&crate_len);
         }
-        let command_config = RPCCommandConfig::new(client.as_ref());
 
         process_deploy_program(
             client.rpc_client.clone(),
-            &command_config.0,
-            &program_data,
-            program_data.len() as u32,
+            &cli_config,
+            &AdditionalCliConfig::default(),
             &signer.pubkey(),
-            Some(signer),
+            None,
+            Some(&2),
+            &client.authority_signer_index,
+            &program_data,
+            None..None,
         )
         .map_err(|e| {
             error!("Failed to deploy the program: {}", e);
@@ -141,11 +146,10 @@ impl Program {
 
     fn dump(&mut self, client: Arc<Client>) -> Result<(), Error> {
         info!("Fetching program {:?}", self.id);
-        let command_config = RPCCommandConfig::new(client.as_ref());
 
         process_dump(
             client.rpc_client.clone(),
-            command_config.0.commitment,
+            &client.get_cli_config(),
             Some(self.id),
             &self.path,
         )

@@ -1,12 +1,13 @@
 use {
     solana_account_decoder::{
-        parse_account_data::SplTokenAdditionalData,
-        parse_token::{is_known_spl_token_id, token_amount_to_ui_amount_v2, UiTokenAmount},
+        parse_account_data::SplTokenAdditionalDataV2,
+        parse_token::{is_known_spl_token_id, token_amount_to_ui_amount_v3, UiTokenAmount},
     },
     solana_measure::measure::Measure,
     solana_metrics::datapoint_debug,
     solana_runtime::{bank::Bank, transaction_batch::TransactionBatch},
-    solana_sdk::{account::ReadableAccount, pubkey::Pubkey, transaction::SanitizedTransaction},
+    solana_sdk::{account::ReadableAccount, pubkey::Pubkey},
+    solana_svm_transaction::svm_message::SVMMessage,
     solana_transaction_status::{
         token_balances::TransactionTokenBalances, TransactionTokenBalance,
     },
@@ -37,20 +38,20 @@ fn get_mint_decimals(bank: &Bank, mint: &Pubkey) -> Option<u8> {
 
 pub fn collect_token_balances(
     bank: &Bank,
-    batch: &TransactionBatch<SanitizedTransaction>,
+    batch: &TransactionBatch<impl SVMMessage>,
     mint_decimals: &mut HashMap<Pubkey, u8>,
 ) -> TransactionTokenBalances {
     let mut balances: TransactionTokenBalances = vec![];
     let mut collect_time = Measure::start("collect_token_balances");
 
     for transaction in batch.sanitized_transactions() {
-        let account_keys = transaction.message().account_keys();
+        let account_keys = transaction.account_keys();
         let has_token_program = account_keys.iter().any(is_known_spl_token_id);
 
         let mut transaction_balances: Vec<TransactionTokenBalance> = vec![];
         if has_token_program {
             for (index, account_id) in account_keys.iter().enumerate() {
-                if transaction.message().is_invoked(index) || is_known_spl_token_id(account_id) {
+                if transaction.is_invoked(index) || is_known_spl_token_id(account_id) {
                     continue;
                 }
 
@@ -112,12 +113,12 @@ fn collect_token_balance_from_account(
     Some(TokenBalanceData {
         mint: token_account.base.mint.to_string(),
         owner: token_account.base.owner.to_string(),
-        ui_token_amount: token_amount_to_ui_amount_v2(
+        ui_token_amount: token_amount_to_ui_amount_v3(
             token_account.base.amount,
             // NOTE: Same as parsed instruction data, ledger data always uses
             // the raw token amount, and does not calculate the UI amount with
             // any consideration for interest.
-            &SplTokenAdditionalData::with_decimals(decimals),
+            &SplTokenAdditionalDataV2::with_decimals(decimals),
         ),
         program_id: account.owner().to_string(),
     })
@@ -127,15 +128,14 @@ fn collect_token_balance_from_account(
 mod test {
     use {
         super::*,
+        solana_program_option::COption,
+        solana_program_pack::Pack,
         solana_sdk::{account::Account, genesis_config::create_genesis_config},
         spl_pod::optional_keys::OptionalNonZeroPubkey,
-        spl_token_2022::{
-            extension::{
-                immutable_owner::ImmutableOwner, memo_transfer::MemoTransfer,
-                mint_close_authority::MintCloseAuthority, BaseStateWithExtensionsMut,
-                ExtensionType, StateWithExtensionsMut,
-            },
-            solana_program::{program_option::COption, program_pack::Pack},
+        spl_token_2022::extension::{
+            immutable_owner::ImmutableOwner, memo_transfer::MemoTransfer,
+            mint_close_authority::MintCloseAuthority, BaseStateWithExtensionsMut, ExtensionType,
+            StateWithExtensionsMut,
         },
         std::collections::BTreeMap,
     };

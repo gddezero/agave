@@ -5,12 +5,17 @@
 //! corresponding secret key). To generate the proof, a prover must provide the secret key for the
 //! public key.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 #[cfg(not(target_os = "solana"))]
 use {
     crate::{
         encryption::elgamal::ElGamalKeypair,
         sigma_proofs::pubkey_validity::PubkeyValidityProof,
-        zk_elgamal_proof_program::errors::{ProofGenerationError, ProofVerificationError},
+        zk_elgamal_proof_program::{
+            errors::{ProofGenerationError, ProofVerificationError},
+            proof_data::errors::ProofDataError,
+        },
     },
     bytemuck::bytes_of,
     merlin::Transcript,
@@ -20,7 +25,7 @@ use {
     crate::{
         encryption::pod::elgamal::PodElGamalPubkey,
         sigma_proofs::pod::PodPubkeyValidityProof,
-        zk_elgamal_proof_program::proof_data::{ProofType, ZkProofData},
+        zk_elgamal_proof_program::proof_data::{pod::impl_wasm_to_bytes, ProofType, ZkProofData},
     },
     bytemuck_derive::{Pod, Zeroable},
 };
@@ -30,6 +35,7 @@ use {
 ///
 /// It includes the cryptographic proof as well as the context data information needed to verify
 /// the proof.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PubkeyValidityProofData {
@@ -41,6 +47,7 @@ pub struct PubkeyValidityProofData {
 }
 
 /// The context data needed to verify a pubkey validity proof.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PubkeyValidityProofContext {
@@ -49,6 +56,7 @@ pub struct PubkeyValidityProofContext {
 }
 
 #[cfg(not(target_os = "solana"))]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl PubkeyValidityProofData {
     pub fn new(keypair: &ElGamalKeypair) -> Result<Self, ProofGenerationError> {
         let pod_pubkey = PodElGamalPubkey(keypair.pubkey().into());
@@ -61,6 +69,8 @@ impl PubkeyValidityProofData {
         Ok(PubkeyValidityProofData { context, proof })
     }
 }
+
+impl_wasm_to_bytes!(TYPE = PubkeyValidityProofData);
 
 impl ZkProofData<PubkeyValidityProofContext> for PubkeyValidityProofData {
     const PROOF_TYPE: ProofType = ProofType::PubkeyValidity;
@@ -87,6 +97,8 @@ impl PubkeyValidityProofContext {
         transcript
     }
 }
+
+impl_wasm_to_bytes!(TYPE = PubkeyValidityProofContext);
 
 #[cfg(test)]
 mod test {

@@ -1,5 +1,5 @@
 //! This module provides [`LeaderUpdater`] trait along with
-//! `create_leader_updater` function to create an instance of this trait.
+//! [`create_leader_updater`] function to create an instance of this trait.
 //!
 //! Currently, the main purpose of [`LeaderUpdater`] is to abstract over leader
 //! updates, hiding the details of how leaders are retrieved and which
@@ -11,6 +11,7 @@
 use {
     async_trait::async_trait,
     log::*,
+    solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS,
     solana_connection_cache::connection_cache::Protocol,
     solana_rpc_client::nonblocking::rpc_client::RpcClient,
     solana_sdk::clock::NUM_CONSECUTIVE_LEADER_SLOTS,

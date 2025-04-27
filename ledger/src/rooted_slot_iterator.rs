@@ -1,5 +1,5 @@
 use {
-    crate::{blockstore::*, blockstore_db::Result, blockstore_meta::SlotMeta},
+    crate::{blockstore::*, blockstore_meta::SlotMeta},
     log::*,
     solana_sdk::clock::Slot,
 };
@@ -23,7 +23,7 @@ impl<'a> RootedSlotIterator<'a> {
         }
     }
 }
-impl<'a> Iterator for RootedSlotIterator<'a> {
+impl Iterator for RootedSlotIterator<'_> {
     type Item = (Slot, Option<SlotMeta>);
 
     fn next(&mut self) -> Option<Self::Item> {

@@ -2,6 +2,7 @@
 mod serde_snapshot_tests {
     use {
         crate::{
+            bank::BankHashStats,
             serde_snapshot::{
                 deserialize_accounts_db_fields, reconstruct_accountsdb_from_fields,
                 remap_append_vec_file, SerializableAccountsDb, SnapshotAccountsDbFields,
@@ -12,7 +13,7 @@ mod serde_snapshot_tests {
         log::info,
         rand::{thread_rng, Rng},
         solana_accounts_db::{
-            account_storage::{AccountStorageMap, AccountStorageReference},
+            account_storage::AccountStorageMap,
             accounts::Accounts,
             accounts_db::{
                 get_temp_accounts_paths, test_utils::create_test_accounts, AccountStorageEntry,
@@ -22,6 +23,7 @@ mod serde_snapshot_tests {
             accounts_hash::AccountsHash,
             ancestors::Ancestors,
         },
+        solana_nohash_hasher::BuildNoHashHasher,
         solana_sdk::{
             account::{AccountSharedData, ReadableAccount},
             clock::Slot,
@@ -83,6 +85,7 @@ mod serde_snapshot_tests {
             None,
             (u64::default(), None),
             None,
+            false,
         )
         .map(|(accounts_db, _)| accounts_db)
     }
@@ -107,7 +110,7 @@ mod serde_snapshot_tests {
     where
         W: Write,
     {
-        let bank_hash_stats = accounts_db.get_bank_hash_stats(slot).unwrap();
+        let bank_hash_stats = BankHashStats::default();
         let accounts_delta_hash = accounts_db.get_accounts_delta_hash(slot).unwrap();
         let accounts_hash = accounts_db.get_accounts_hash(slot).unwrap().0;
         let write_version = accounts_db.write_version.load(Ordering::Acquire);
@@ -130,8 +133,11 @@ mod serde_snapshot_tests {
         output_dir: impl AsRef<Path>,
         storage_access: StorageAccess,
     ) -> Result<StorageAndNextAccountsFileId, AccountsFileError> {
-        let storage_entries = accounts_db.get_snapshot_storages(RangeFull).0;
-        let storage: AccountStorageMap = AccountStorageMap::with_capacity(storage_entries.len());
+        let storage_entries = accounts_db.get_storages(RangeFull).0;
+        let storage: AccountStorageMap = AccountStorageMap::with_capacity_and_hasher(
+            storage_entries.len(),
+            BuildNoHashHasher::default(),
+        );
         let mut next_append_vec_id = 0;
         for storage_entry in storage_entries.into_iter() {
             // Copy file to new directory
@@ -153,13 +159,7 @@ mod serde_snapshot_tests {
                 num_accounts,
             );
             next_append_vec_id = next_append_vec_id.max(new_storage_entry.id());
-            storage.insert(
-                new_storage_entry.slot(),
-                AccountStorageReference {
-                    id: new_storage_entry.id(),
-                    storage: Arc::new(new_storage_entry),
-                },
-            );
+            storage.insert(new_storage_entry.slot(), Arc::new(new_storage_entry));
         }
 
         Ok(StorageAndNextAccountsFileId {
@@ -174,7 +174,7 @@ mod serde_snapshot_tests {
         storage_access: StorageAccess,
     ) -> AccountsDb {
         let mut writer = Cursor::new(vec![]);
-        let snapshot_storages = accounts.get_snapshot_storages(..=slot).0;
+        let snapshot_storages = accounts.get_storages(..=slot).0;
         accountsdb_to_stream(
             &mut writer,
             accounts,
@@ -240,7 +240,7 @@ mod serde_snapshot_tests {
             &mut writer,
             &accounts.accounts_db,
             slot,
-            &get_storages_to_serialize(&accounts.accounts_db.get_snapshot_storages(..=slot).0),
+            &get_storages_to_serialize(&accounts.accounts_db.get_storages(..=slot).0),
         )
         .unwrap();
 
@@ -279,7 +279,7 @@ mod serde_snapshot_tests {
         let unrooted_slot = 9;
         let unrooted_bank_id = 9;
         let db = AccountsDb::new_single_for_tests();
-        let key = solana_sdk::pubkey::new_rand();
+        let key = solana_pubkey::new_rand();
         let account0 = AccountSharedData::new(1, 0, &key);
         db.store_for_tests(unrooted_slot, &[(&key, &account0)]);
 
@@ -287,7 +287,7 @@ mod serde_snapshot_tests {
         db.remove_unrooted_slots(&[(unrooted_slot, unrooted_bank_id)]);
 
         // Add a new root
-        let key2 = solana_sdk::pubkey::new_rand();
+        let key2 = solana_pubkey::new_rand();
         let new_root = unrooted_slot + 1;
         db.store_for_tests(new_root, &[(&key2, &account0)]);
         db.add_root_and_flush_write_cache(new_root);
@@ -435,11 +435,11 @@ mod serde_snapshot_tests {
         let owner = *AccountSharedData::default().owner();
 
         let account = AccountSharedData::new(some_lamport, no_data, &owner);
-        let pubkey = solana_sdk::pubkey::new_rand();
+        let pubkey = solana_pubkey::new_rand();
         let zero_lamport_account = AccountSharedData::new(zero_lamport, no_data, &owner);
 
         let account2 = AccountSharedData::new(some_lamport + 1, no_data, &owner);
-        let pubkey2 = solana_sdk::pubkey::new_rand();
+        let pubkey2 = solana_pubkey::new_rand();
 
         let accounts = AccountsDb::new_single_for_tests();
 
@@ -491,9 +491,9 @@ mod serde_snapshot_tests {
         let account3 = AccountSharedData::new(some_lamport + 100_002, no_data, &owner);
         let zero_lamport_account = AccountSharedData::new(zero_lamport, no_data, &owner);
 
-        let pubkey = solana_sdk::pubkey::new_rand();
-        let purged_pubkey1 = solana_sdk::pubkey::new_rand();
-        let purged_pubkey2 = solana_sdk::pubkey::new_rand();
+        let pubkey = solana_pubkey::new_rand();
+        let purged_pubkey1 = solana_pubkey::new_rand();
+        let purged_pubkey2 = solana_pubkey::new_rand();
 
         let dummy_account = AccountSharedData::new(dummy_lamport, no_data, &owner);
         let dummy_pubkey = Pubkey::default();
@@ -583,10 +583,10 @@ mod serde_snapshot_tests {
         let dummy_account = AccountSharedData::new(99_999_999, no_data, &owner);
         let zero_lamport_account = AccountSharedData::new(zero_lamport, no_data, &owner);
 
-        let pubkey = solana_sdk::pubkey::new_rand();
-        let dummy_pubkey = solana_sdk::pubkey::new_rand();
-        let purged_pubkey1 = solana_sdk::pubkey::new_rand();
-        let purged_pubkey2 = solana_sdk::pubkey::new_rand();
+        let pubkey = solana_pubkey::new_rand();
+        let dummy_pubkey = solana_pubkey::new_rand();
+        let purged_pubkey1 = solana_pubkey::new_rand();
+        let purged_pubkey2 = solana_pubkey::new_rand();
 
         let mut current_slot = 0;
         let accounts = AccountsDb::new_single_for_tests();
@@ -654,9 +654,9 @@ mod serde_snapshot_tests {
         let dummy_account = AccountSharedData::new(dummy_lamport, no_data, &owner);
         let zero_lamport_account = AccountSharedData::new(zero_lamport, no_data, &owner);
 
-        let pubkey1 = solana_sdk::pubkey::new_rand();
-        let pubkey2 = solana_sdk::pubkey::new_rand();
-        let dummy_pubkey = solana_sdk::pubkey::new_rand();
+        let pubkey1 = solana_pubkey::new_rand();
+        let pubkey2 = solana_pubkey::new_rand();
+        let dummy_pubkey = solana_pubkey::new_rand();
 
         let mut current_slot = 0;
         let accounts = AccountsDb::new_single_for_tests();
@@ -784,7 +784,7 @@ mod serde_snapshot_tests {
 
             let pubkey_count = 100;
             let pubkeys: Vec<_> = (0..pubkey_count)
-                .map(|_| solana_sdk::pubkey::new_rand())
+                .map(|_| solana_pubkey::new_rand())
                 .collect();
 
             let some_lamport = 223;

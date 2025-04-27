@@ -1,11 +1,9 @@
 use {
     super::{
         consumer::LeaderProcessedTransactionCounts,
+        latest_unprocessed_votes::VoteBatchInsertionMetrics,
         leader_slot_timing_metrics::{LeaderExecuteAndCommitTimings, LeaderSlotTimingMetrics},
         packet_deserializer::PacketReceiverStats,
-        unprocessed_transaction_storage::{
-            InsertPacketBatchSummary, UnprocessedTransactionStorage,
-        },
     },
     solana_poh::poh_recorder::BankStart,
     solana_sdk::{clock::Slot, saturating_add_assign},
@@ -94,50 +92,6 @@ impl CommittedTransactionsCounts {
     }
 }
 
-// Metrics describing prioritization fee information for each transaction storage before processing transactions
-#[derive(Debug, Default)]
-struct LeaderPrioritizationFeesMetrics {
-    // minimum prioritization fees in the MinMaxHeap
-    min_prioritization_fees_per_cu: u64,
-    // maximum prioritization fees in the MinMaxHeap
-    max_prioritization_fees_per_cu: u64,
-}
-
-impl LeaderPrioritizationFeesMetrics {
-    fn new(unprocessed_transaction_storage: Option<&UnprocessedTransactionStorage>) -> Self {
-        if let Some(unprocessed_transaction_storage) = unprocessed_transaction_storage {
-            Self {
-                min_prioritization_fees_per_cu: unprocessed_transaction_storage
-                    .get_min_priority()
-                    .unwrap_or_default(),
-                max_prioritization_fees_per_cu: unprocessed_transaction_storage
-                    .get_max_priority()
-                    .unwrap_or_default(),
-            }
-        } else {
-            Self::default()
-        }
-    }
-
-    fn report(&self, id: &str, slot: Slot) {
-        datapoint_info!(
-            "banking_stage-leader_prioritization_fees_info",
-            "id" => id,
-            ("slot", slot, i64),
-            (
-                "min_prioritization_fees_per_cu",
-                self.min_prioritization_fees_per_cu,
-                i64
-            ),
-            (
-                "max_prioritization_fees_per_cu",
-                self.max_prioritization_fees_per_cu,
-                i64
-            )
-        );
-    }
-}
-
 // Metrics describing packets ingested/processed in various parts of BankingStage during this
 // validator's leader slot
 #[derive(Debug, Default)]
@@ -220,24 +174,6 @@ struct LeaderSlotPacketCountMetrics {
     // according to the cost model. These transactions are added back to the buffered queue and are
     // already counted in `self.retrayble_errored_transaction_count`.
     cost_model_throttled_transactions_count: u64,
-
-    // total number of forwardsable packets that failed forwarding
-    failed_forwarded_packets_count: u64,
-
-    // total number of forwardsable packets that were successfully forwarded
-    successful_forwarded_packets_count: u64,
-
-    // total number of attempted forwards that failed. Note this is not a count of the number of packets
-    // that failed, just the total number of batches of packets that failed forwarding
-    packet_batch_forward_failure_count: u64,
-
-    // total number of valid unprocessed packets in the buffer that were removed after being forwarded
-    cleared_from_buffer_after_forward_count: u64,
-
-    // total number of forwardable batches that were attempted for forwarding. A forwardable batch
-    // is defined in `ForwardPacketBatchesByAccounts` in `forward_packet_batches_by_accounts.rs`
-    forwardable_batches_count: u64,
-
     // min prioritization fees for scheduled transactions
     min_prioritization_fees: u64,
     // max prioritization fees for scheduled transactions
@@ -355,31 +291,6 @@ impl LeaderSlotPacketCountMetrics {
                 i64
             ),
             (
-                "failed_forwarded_packets_count",
-                self.failed_forwarded_packets_count,
-                i64
-            ),
-            (
-                "successful_forwarded_packets_count",
-                self.successful_forwarded_packets_count,
-                i64
-            ),
-            (
-                "packet_batch_forward_failure_count",
-                self.packet_batch_forward_failure_count,
-                i64
-            ),
-            (
-                "cleared_from_buffer_after_forward_count",
-                self.cleared_from_buffer_after_forward_count,
-                i64
-            ),
-            (
-                "forwardable_batches_count",
-                self.forwardable_batches_count,
-                i64
-            ),
-            (
                 "end_of_slot_unprocessed_buffer_len",
                 self.end_of_slot_unprocessed_buffer_len,
                 i64
@@ -403,88 +314,88 @@ fn report_transaction_error_metrics(errors: &TransactionErrorMetrics, id: &str, 
         "banking_stage-leader_slot_transaction_errors",
         "id" => id,
         ("slot", slot as i64, i64),
-        ("total", errors.total as i64, i64),
-        ("account_in_use", errors.account_in_use as i64, i64),
+        ("total", errors.total.0 as i64, i64),
+        ("account_in_use", errors.account_in_use.0 as i64, i64),
         (
             "too_many_account_locks",
-            errors.too_many_account_locks as i64,
+            errors.too_many_account_locks.0 as i64,
             i64
         ),
         (
             "account_loaded_twice",
-            errors.account_loaded_twice as i64,
+            errors.account_loaded_twice.0 as i64,
             i64
         ),
-        ("account_not_found", errors.account_not_found as i64, i64),
-        ("blockhash_not_found", errors.blockhash_not_found as i64, i64),
-        ("blockhash_too_old", errors.blockhash_too_old as i64, i64),
-        ("call_chain_too_deep", errors.call_chain_too_deep as i64, i64),
-        ("already_processed", errors.already_processed as i64, i64),
-        ("instruction_error", errors.instruction_error as i64, i64),
-        ("insufficient_funds", errors.insufficient_funds as i64, i64),
+        ("account_not_found", errors.account_not_found.0 as i64, i64),
+        ("blockhash_not_found", errors.blockhash_not_found.0 as i64, i64),
+        ("blockhash_too_old", errors.blockhash_too_old.0 as i64, i64),
+        ("call_chain_too_deep", errors.call_chain_too_deep.0 as i64, i64),
+        ("already_processed", errors.already_processed.0 as i64, i64),
+        ("instruction_error", errors.instruction_error.0 as i64, i64),
+        ("insufficient_funds", errors.insufficient_funds.0 as i64, i64),
         (
             "invalid_account_for_fee",
-            errors.invalid_account_for_fee as i64,
+            errors.invalid_account_for_fee.0 as i64,
             i64
         ),
         (
             "invalid_account_index",
-            errors.invalid_account_index as i64,
+            errors.invalid_account_index.0 as i64,
             i64
         ),
         (
             "invalid_program_for_execution",
-            errors.invalid_program_for_execution as i64,
+            errors.invalid_program_for_execution.0 as i64,
             i64
         ),
         (
             "invalid_compute_budget",
-            errors.invalid_compute_budget as i64,
+            errors.invalid_compute_budget.0 as i64,
             i64
         ),
         (
             "not_allowed_during_cluster_maintenance",
-            errors.not_allowed_during_cluster_maintenance as i64,
+            errors.not_allowed_during_cluster_maintenance.0 as i64,
             i64
         ),
         (
             "invalid_writable_account",
-            errors.invalid_writable_account as i64,
+            errors.invalid_writable_account.0 as i64,
             i64
         ),
         (
             "invalid_rent_paying_account",
-            errors.invalid_rent_paying_account as i64,
+            errors.invalid_rent_paying_account.0 as i64,
             i64
         ),
         (
             "would_exceed_max_block_cost_limit",
-            errors.would_exceed_max_block_cost_limit as i64,
+            errors.would_exceed_max_block_cost_limit.0 as i64,
             i64
         ),
         (
             "would_exceed_max_account_cost_limit",
-            errors.would_exceed_max_account_cost_limit as i64,
+            errors.would_exceed_max_account_cost_limit.0 as i64,
             i64
         ),
         (
             "would_exceed_max_vote_cost_limit",
-            errors.would_exceed_max_vote_cost_limit as i64,
+            errors.would_exceed_max_vote_cost_limit.0 as i64,
             i64
         ),
         (
             "would_exceed_account_data_block_limit",
-            errors.would_exceed_account_data_block_limit as i64,
+            errors.would_exceed_account_data_block_limit.0 as i64,
             i64
         ),
         (
             "max_loaded_accounts_data_size_exceeded",
-            errors.max_loaded_accounts_data_size_exceeded as i64,
+            errors.max_loaded_accounts_data_size_exceeded.0 as i64,
             i64
         ),
         (
             "program_execution_temporarily_restricted",
-            errors.program_execution_temporarily_restricted as i64,
+            errors.program_execution_temporarily_restricted.0 as i64,
             i64
         ),
     );
@@ -508,19 +419,12 @@ pub(crate) struct LeaderSlotMetrics {
 
     timing_metrics: LeaderSlotTimingMetrics,
 
-    prioritization_fees_metric: LeaderPrioritizationFeesMetrics,
-
     // Used by tests to check if the `self.report()` method was called
     is_reported: bool,
 }
 
 impl LeaderSlotMetrics {
-    pub(crate) fn new(
-        id: u32,
-        slot: Slot,
-        bank_creation_time: &Instant,
-        unprocessed_transaction_storage: Option<&UnprocessedTransactionStorage>,
-    ) -> Self {
+    pub(crate) fn new(id: u32, slot: Slot, bank_creation_time: &Instant) -> Self {
         Self {
             id: id.to_string(),
             slot,
@@ -528,9 +432,6 @@ impl LeaderSlotMetrics {
             transaction_error_metrics: TransactionErrorMetrics::new(),
             vote_packet_count_metrics: VotePacketCountMetrics::new(),
             timing_metrics: LeaderSlotTimingMetrics::new(bank_creation_time),
-            prioritization_fees_metric: LeaderPrioritizationFeesMetrics::new(
-                unprocessed_transaction_storage,
-            ),
             is_reported: false,
         }
     }
@@ -542,7 +443,6 @@ impl LeaderSlotMetrics {
         report_transaction_error_metrics(&self.transaction_error_metrics, &self.id, self.slot);
         self.packet_count_metrics.report(&self.id, self.slot);
         self.vote_packet_count_metrics.report(&self.id, self.slot);
-        self.prioritization_fees_metric.report(&self.id, self.slot);
     }
 
     /// Returns `Some(self.slot)` if the metrics have been reported, otherwise returns None
@@ -614,7 +514,6 @@ impl LeaderSlotMetricsTracker {
     pub(crate) fn check_leader_slot_boundary(
         &mut self,
         bank_start: Option<&BankStart>,
-        unprocessed_transaction_storage: Option<&UnprocessedTransactionStorage>,
     ) -> MetricsTrackerAction {
         match (self.leader_slot_metrics.as_mut(), bank_start) {
             (None, None) => MetricsTrackerAction::Noop,
@@ -630,7 +529,6 @@ impl LeaderSlotMetricsTracker {
                     self.id,
                     bank_start.working_bank.slot(),
                     &bank_start.bank_creation_time,
-                    unprocessed_transaction_storage,
                 )))
             }
 
@@ -642,7 +540,6 @@ impl LeaderSlotMetricsTracker {
                         self.id,
                         bank_start.working_bank.slot(),
                         &bank_start.bank_creation_time,
-                        unprocessed_transaction_storage,
                     )))
                 } else {
                     MetricsTrackerAction::Noop
@@ -745,14 +642,14 @@ impl LeaderSlotMetricsTracker {
                 leader_slot_metrics
                     .packet_count_metrics
                     .account_lock_throttled_transactions_count,
-                error_counters.account_in_use as u64
+                error_counters.account_in_use.0 as u64
             );
 
             saturating_add_assign!(
                 leader_slot_metrics
                     .packet_count_metrics
                     .account_locks_limit_throttled_transactions_count,
-                error_counters.too_many_account_locks as u64
+                error_counters.too_many_account_locks.0 as u64
             );
 
             saturating_add_assign!(
@@ -762,13 +659,10 @@ impl LeaderSlotMetricsTracker {
                 *cost_model_throttled_transactions_count
             );
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .cost_model_us,
-                *cost_model_us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .cost_model_us += cost_model_us;
 
             leader_slot_metrics
                 .packet_count_metrics
@@ -794,18 +688,18 @@ impl LeaderSlotMetricsTracker {
         }
     }
 
-    pub(crate) fn accumulate_insert_packet_batches_summary(
+    pub(crate) fn accumulate_vote_batch_insertion_metrics(
         &mut self,
-        insert_packet_batches_summary: &InsertPacketBatchSummary,
+        vote_batch_insertion_metrics: &VoteBatchInsertionMetrics,
     ) {
         self.increment_exceeded_buffer_limit_dropped_packets_count(
-            insert_packet_batches_summary.total_dropped_packets() as u64,
+            vote_batch_insertion_metrics.total_dropped_packets() as u64,
         );
         self.increment_dropped_gossip_vote_count(
-            insert_packet_batches_summary.dropped_gossip_packets() as u64,
+            vote_batch_insertion_metrics.dropped_gossip_packets() as u64,
         );
         self.increment_dropped_tpu_vote_count(
-            insert_packet_batches_summary.dropped_tpu_packets() as u64
+            vote_batch_insertion_metrics.dropped_tpu_packets() as u64
         );
     }
 
@@ -886,61 +780,6 @@ impl LeaderSlotMetricsTracker {
         }
     }
 
-    pub(crate) fn increment_failed_forwarded_packets_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .failed_forwarded_packets_count,
-                count
-            );
-        }
-    }
-
-    pub(crate) fn increment_successful_forwarded_packets_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .successful_forwarded_packets_count,
-                count
-            );
-        }
-    }
-
-    pub(crate) fn increment_packet_batch_forward_failure_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .packet_batch_forward_failure_count,
-                count
-            );
-        }
-    }
-
-    pub(crate) fn increment_cleared_from_buffer_after_forward_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .cleared_from_buffer_after_forward_count,
-                count
-            );
-        }
-    }
-
-    pub(crate) fn increment_forwardable_batches_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .forwardable_batches_count,
-                count
-            );
-        }
-    }
-
     pub(crate) fn increment_retryable_packets_count(&mut self, count: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
             saturating_add_assign!(
@@ -995,98 +834,56 @@ impl LeaderSlotMetricsTracker {
     // Processing buffer timing metrics
     pub(crate) fn increment_make_decision_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .make_decision_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_buffered_packets_timings
+                .make_decision_us += us;
         }
     }
 
     pub(crate) fn increment_consume_buffered_packets_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .consume_buffered_packets_us,
-                us
-            );
-        }
-    }
-
-    pub(crate) fn increment_forward_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .forward_us,
-                us
-            );
-        }
-    }
-
-    pub(crate) fn increment_forward_and_hold_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .forward_and_hold_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_buffered_packets_timings
+                .consume_buffered_packets_us += us;
         }
     }
 
     pub(crate) fn increment_process_packets_transactions_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .consume_buffered_packets_timings
-                    .process_packets_transactions_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .consume_buffered_packets_timings
+                .process_packets_transactions_us += us
         }
     }
 
     // Processing packets timing metrics
     pub(crate) fn increment_transactions_from_packets_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .transactions_from_packets_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .transactions_from_packets_us += us;
         }
     }
 
     pub(crate) fn increment_process_transactions_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .process_transactions_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .process_transactions_us += us;
         }
     }
 
     pub(crate) fn increment_filter_retryable_packets_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .filter_retryable_packets_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .filter_retryable_packets_us += us;
         }
     }
 
@@ -1117,8 +914,8 @@ impl LeaderSlotMetricsTracker {
 mod tests {
     use {
         super::*,
+        solana_pubkey::Pubkey,
         solana_runtime::{bank::Bank, genesis_utils::create_genesis_config},
-        solana_sdk::pubkey::Pubkey,
         std::{mem, sync::Arc},
     };
 
@@ -1168,7 +965,7 @@ mod tests {
             ..
         } = setup_test_slot_boundary_banks();
         // Test that with no bank being tracked, and no new bank being tracked, nothing is reported
-        let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None, None);
+        let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None);
         assert_eq!(
             mem::discriminant(&MetricsTrackerAction::Noop),
             mem::discriminant(&action)
@@ -1188,8 +985,8 @@ mod tests {
         // Test case where the thread has not detected a leader bank, and now sees a leader bank.
         // Metrics should not be reported because leader slot has not ended
         assert!(leader_slot_metrics_tracker.leader_slot_metrics.is_none());
-        let action = leader_slot_metrics_tracker
-            .check_leader_slot_boundary(Some(&first_poh_recorder_bank), None);
+        let action =
+            leader_slot_metrics_tracker.check_leader_slot_boundary(Some(&first_poh_recorder_bank));
         assert_eq!(
             mem::discriminant(&MetricsTrackerAction::NewTracker(None)),
             mem::discriminant(&action)
@@ -1213,12 +1010,12 @@ mod tests {
         {
             // Setup first_bank
             let action = leader_slot_metrics_tracker
-                .check_leader_slot_boundary(Some(&first_poh_recorder_bank), None);
+                .check_leader_slot_boundary(Some(&first_poh_recorder_bank));
             assert!(leader_slot_metrics_tracker.apply_action(action).is_none());
         }
         {
             // Assert reporting if slot has ended
-            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None, None);
+            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None);
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::ReportAndResetTracker),
                 mem::discriminant(&action)
@@ -1231,7 +1028,7 @@ mod tests {
         }
         {
             // Assert no-op if still no new bank
-            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None, None);
+            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None);
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::Noop),
                 mem::discriminant(&action)
@@ -1253,13 +1050,13 @@ mod tests {
         {
             // Setup with first_bank
             let action = leader_slot_metrics_tracker
-                .check_leader_slot_boundary(Some(&first_poh_recorder_bank), None);
+                .check_leader_slot_boundary(Some(&first_poh_recorder_bank));
             assert!(leader_slot_metrics_tracker.apply_action(action).is_none());
         }
         {
             // Assert nop-op if same bank
             let action = leader_slot_metrics_tracker
-                .check_leader_slot_boundary(Some(&first_poh_recorder_bank), None);
+                .check_leader_slot_boundary(Some(&first_poh_recorder_bank));
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::Noop),
                 mem::discriminant(&action)
@@ -1268,7 +1065,7 @@ mod tests {
         }
         {
             // Assert reporting if slot has ended
-            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None, None);
+            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None);
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::ReportAndResetTracker),
                 mem::discriminant(&action)
@@ -1297,13 +1094,13 @@ mod tests {
         {
             // Setup with first_bank
             let action = leader_slot_metrics_tracker
-                .check_leader_slot_boundary(Some(&first_poh_recorder_bank), None);
+                .check_leader_slot_boundary(Some(&first_poh_recorder_bank));
             assert!(leader_slot_metrics_tracker.apply_action(action).is_none());
         }
         {
             // Assert reporting if new bank
             let action = leader_slot_metrics_tracker
-                .check_leader_slot_boundary(Some(&next_poh_recorder_bank), None);
+                .check_leader_slot_boundary(Some(&next_poh_recorder_bank));
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::ReportAndNewTracker(None)),
                 mem::discriminant(&action)
@@ -1316,7 +1113,7 @@ mod tests {
         }
         {
             // Assert reporting if slot has ended
-            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None, None);
+            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None);
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::ReportAndResetTracker),
                 mem::discriminant(&action)
@@ -1344,13 +1141,13 @@ mod tests {
         {
             // Setup with next_bank
             let action = leader_slot_metrics_tracker
-                .check_leader_slot_boundary(Some(&next_poh_recorder_bank), None);
+                .check_leader_slot_boundary(Some(&next_poh_recorder_bank));
             assert!(leader_slot_metrics_tracker.apply_action(action).is_none());
         }
         {
             // Assert reporting if new bank
             let action = leader_slot_metrics_tracker
-                .check_leader_slot_boundary(Some(&first_poh_recorder_bank), None);
+                .check_leader_slot_boundary(Some(&first_poh_recorder_bank));
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::ReportAndNewTracker(None)),
                 mem::discriminant(&action)
@@ -1363,7 +1160,7 @@ mod tests {
         }
         {
             // Assert reporting if slot has ended
-            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None, None);
+            let action = leader_slot_metrics_tracker.check_leader_slot_boundary(None);
             assert_eq!(
                 mem::discriminant(&MetricsTrackerAction::ReportAndResetTracker),
                 mem::discriminant(&action)

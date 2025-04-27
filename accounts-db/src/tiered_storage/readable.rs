@@ -11,7 +11,8 @@ use {
             TieredStorageResult,
         },
     },
-    solana_sdk::{account::AccountSharedData, pubkey::Pubkey},
+    solana_account::AccountSharedData,
+    solana_pubkey::Pubkey,
     std::path::Path,
 };
 
@@ -38,7 +39,7 @@ impl TieredStorageReader {
         }
     }
 
-    /// Returns whether the nderlying storage is empty.
+    /// Returns whether the underlying storage is empty.
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Hot(hot) => hot.is_empty(),

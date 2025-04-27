@@ -30,8 +30,12 @@ pub mod contains;
 pub mod epoch_accounts_hash;
 mod file_io;
 pub mod hardened_unpack;
+mod is_zero_lamport;
 pub mod partitioned_rewards;
 pub mod pubkey_bins;
+#[cfg(feature = "dev-context-only-utils")]
+pub mod read_only_accounts_cache;
+#[cfg(not(feature = "dev-context-only-utils"))]
 mod read_only_accounts_cache;
 mod rolling_bit_field;
 pub mod secondary_index;

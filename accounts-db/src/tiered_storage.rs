@@ -164,6 +164,11 @@ impl TieredStorage {
         self.reader()
             .map_or(MAX_TIERED_STORAGE_FILE_SIZE, |reader| reader.capacity())
     }
+
+    pub fn dead_bytes_due_to_zero_lamport_single_ref(&self, count: usize) -> usize {
+        const ZERO_LAMPORT_ACCOUNT_SIZE: usize = 42; // approximately 42 bytes per zero lamport account
+        count * ZERO_LAMPORT_ACCOUNT_SIZE
+    }
 }
 
 #[cfg(test)]
@@ -173,12 +178,10 @@ mod tests {
         file::TieredStorageMagicNumber,
         footer::TieredStorageFooter,
         hot::HOT_FORMAT,
-        solana_sdk::{
-            account::{AccountSharedData, ReadableAccount},
-            clock::Slot,
-            pubkey::Pubkey,
-            system_instruction::MAX_PERMITTED_DATA_LENGTH,
-        },
+        solana_account::{AccountSharedData, ReadableAccount},
+        solana_clock::Slot,
+        solana_pubkey::Pubkey,
+        solana_system_interface::MAX_PERMITTED_DATA_LENGTH,
         std::{
             collections::{HashMap, HashSet},
             mem::ManuallyDrop,

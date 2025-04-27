@@ -7,6 +7,7 @@ use {
     dashmap::DashMap,
     rand::Rng,
     rayon::iter::{IntoParallelRefIterator, ParallelIterator},
+    solana_account::{Account, AccountSharedData, ReadableAccount},
     solana_accounts_db::{
         account_info::{AccountInfo, StorageLocation},
         accounts::{AccountAddressFilter, Accounts},
@@ -17,13 +18,10 @@ use {
         accounts_index::ScanConfig,
         ancestors::Ancestors,
     },
-    solana_sdk::{
-        account::{Account, AccountSharedData, ReadableAccount},
-        hash::Hash,
-        pubkey::Pubkey,
-        rent_collector::RentCollector,
-        sysvar::epoch_schedule::EpochSchedule,
-    },
+    solana_hash::Hash,
+    solana_pubkey::Pubkey,
+    solana_rent_collector::RentCollector,
+    solana_sysvar::epoch_schedule::EpochSchedule,
     std::{
         collections::{HashMap, HashSet},
         path::PathBuf,
@@ -111,7 +109,7 @@ fn bench_delete_dependencies(bencher: &mut Bencher) {
     let mut old_pubkey = Pubkey::default();
     let zero_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
     for i in 0..1000 {
-        let pubkey = solana_sdk::pubkey::new_rand();
+        let pubkey = solana_pubkey::new_rand();
         let account = AccountSharedData::new(i + 1, 0, AccountSharedData::default().owner());
         accounts.store_slow_uncached(i, &pubkey, &account);
         accounts.store_slow_uncached(i, &old_pubkey, &zero_account);
@@ -136,17 +134,17 @@ where
     let num_keys = 1000;
     let slot = 0;
 
-    let pubkeys: Vec<_> = std::iter::repeat_with(solana_sdk::pubkey::new_rand)
+    let pubkeys: Vec<_> = std::iter::repeat_with(solana_pubkey::new_rand)
         .take(num_keys)
         .collect();
-    let accounts_data: Vec<_> = std::iter::repeat(
+    let accounts_data: Vec<_> = std::iter::repeat_n(
         Account {
             lamports: 1,
             ..Default::default()
         }
         .to_account_shared_data(),
+        num_keys,
     )
-    .take(num_keys)
     .collect();
     let storable_accounts: Vec<_> = pubkeys.iter().zip(accounts_data.iter()).collect();
     accounts.store_accounts_cached((slot, storable_accounts.as_slice()));
@@ -169,7 +167,7 @@ where
 
     let num_new_keys = 1000;
     bencher.iter(|| {
-        let new_pubkeys: Vec<_> = std::iter::repeat_with(solana_sdk::pubkey::new_rand)
+        let new_pubkeys: Vec<_> = std::iter::repeat_with(solana_pubkey::new_rand)
             .take(num_new_keys)
             .collect();
         let new_storable_accounts: Vec<_> = new_pubkeys.iter().zip(accounts_data.iter()).collect();
@@ -348,7 +346,7 @@ fn bench_sort_and_remove_dups(b: &mut Bencher) {
         // offset has to be 8 byte aligned
         let offset = (i as usize) * std::mem::size_of::<u64>();
         AccountFromStorage {
-            index_info: AccountInfo::new(StorageLocation::AppendVec(i as u32, offset), i as u64),
+            index_info: AccountInfo::new(StorageLocation::AppendVec(i as u32, offset), i == 0),
             data_len: i as u64,
             pubkey: Pubkey::new_from_array([i; 32]),
         }
@@ -370,7 +368,7 @@ fn bench_sort_and_remove_dups_no_dups(b: &mut Bencher) {
         // offset has to be 8 byte aligned
         let offset = (i as usize) * std::mem::size_of::<u64>();
         AccountFromStorage {
-            index_info: AccountInfo::new(StorageLocation::AppendVec(i as u32, offset), i as u64),
+            index_info: AccountInfo::new(StorageLocation::AppendVec(i as u32, offset), i == 0),
             data_len: i as u64,
             pubkey: Pubkey::new_unique(),
         }

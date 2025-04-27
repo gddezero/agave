@@ -1,13 +1,14 @@
 use {
-    crate::crds_value::sanitize_wallclock,
+    crate::crds_data::sanitize_wallclock,
     itertools::Itertools,
+    solana_clock::Slot,
     solana_ledger::{
         blockstore::BlockstoreError,
         blockstore_meta::{DuplicateSlotProof, ErasureMeta},
         shred::{self, Shred, ShredType},
     },
+    solana_pubkey::Pubkey,
     solana_sanitize::{Sanitize, SanitizeError},
-    solana_sdk::{clock::Slot, pubkey::Pubkey},
     std::{
         collections::{hash_map::Entry, HashMap},
         convert::TryFrom,
@@ -201,10 +202,10 @@ where
     Err(Error::InvalidErasureMetaConflict)
 }
 
-pub(crate) fn from_shred<F>(
+pub(crate) fn from_shred<T: AsRef<[u8]>, F>(
     shred: Shred,
     self_pubkey: Pubkey, // Pubkey of my node broadcasting crds value.
-    other_payload: Vec<u8>,
+    other_payload: T,
     leader_schedule: Option<F>,
     wallclock: u64,
     max_size: usize, // Maximum serialized size of each DuplicateShred.
@@ -212,8 +213,9 @@ pub(crate) fn from_shred<F>(
 ) -> Result<impl Iterator<Item = DuplicateShred>, Error>
 where
     F: FnOnce(Slot) -> Option<Pubkey>,
+    shred::Payload: From<T>,
 {
-    if shred.payload() == &other_payload {
+    if shred.payload().as_ref() == other_payload.as_ref() {
         return Err(Error::InvalidDuplicateShreds);
     }
     let other_shred = Shred::new_from_serialized_shred(other_payload)?;
@@ -336,12 +338,12 @@ pub(crate) mod tests {
         super::*,
         rand::Rng,
         solana_entry::entry::Entry,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
         solana_ledger::shred::{ProcessShredsStats, ReedSolomonCache, Shredder},
-        solana_sdk::{
-            hash::Hash,
-            signature::{Keypair, Signature, Signer},
-            system_transaction,
-        },
+        solana_signature::Signature,
+        solana_signer::Signer,
+        solana_system_transaction::transfer,
         std::sync::Arc,
         test_case::test_case,
     };
@@ -440,7 +442,7 @@ pub(crate) mod tests {
         is_last_in_slot: bool,
     ) -> (Vec<Shred>, Vec<Shred>) {
         let entries: Vec<_> = std::iter::repeat_with(|| {
-            let tx = system_transaction::transfer(
+            let tx = transfer(
                 &Keypair::new(),       // from
                 &Pubkey::new_unique(), // to
                 rng.gen(),             // lamports

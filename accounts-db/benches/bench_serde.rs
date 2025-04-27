@@ -1,7 +1,9 @@
 use {
     criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput},
     serde::{Deserialize, Serialize},
-    solana_sdk::{account::Account, clock::Epoch, pubkey::Pubkey},
+    solana_account::Account,
+    solana_clock::Epoch,
+    solana_pubkey::Pubkey,
     std::mem,
 };
 

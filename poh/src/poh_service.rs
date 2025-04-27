@@ -6,7 +6,7 @@ use {
     log::*,
     solana_entry::poh::Poh,
     solana_measure::{measure::Measure, measure_us},
-    solana_sdk::poh_config::PohConfig,
+    solana_poh_config::PohConfig,
     std::{
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -376,7 +376,9 @@ impl PohService {
 mod tests {
     use {
         super::*,
+        crossbeam_channel::unbounded,
         rand::{thread_rng, Rng},
+        solana_clock::DEFAULT_HASHES_PER_TICK,
         solana_ledger::{
             blockstore::Blockstore,
             genesis_utils::{create_genesis_config, GenesisConfigInfo},
@@ -386,7 +388,8 @@ mod tests {
         solana_measure::measure::Measure,
         solana_perf::test_tx::test_tx,
         solana_runtime::bank::Bank,
-        solana_sdk::{clock, hash::hash, transaction::VersionedTransaction},
+        solana_sha256_hasher::hash,
+        solana_transaction::versioned::VersionedTransaction,
         std::{thread::sleep, time::Duration},
     };
 
@@ -405,7 +408,7 @@ mod tests {
             PohConfig::default().target_tick_duration.as_micros() as u64;
         let target_tick_duration = Duration::from_micros(default_target_tick_duration);
         let poh_config = PohConfig {
-            hashes_per_tick: Some(clock::DEFAULT_HASHES_PER_TICK),
+            hashes_per_tick: Some(DEFAULT_HASHES_PER_TICK),
             target_tick_duration,
             target_tick_count: None,
         };
@@ -414,7 +417,7 @@ mod tests {
         let ticks_per_slot = bank.ticks_per_slot();
         let leader_schedule_cache = Arc::new(LeaderScheduleCache::new_from_bank(&bank));
         let blockstore = Arc::new(blockstore);
-        let (poh_recorder, entry_receiver, record_receiver) = PohRecorder::new(
+        let (poh_recorder, entry_receiver) = PohRecorder::new(
             bank.tick_height(),
             prev_hash,
             bank.clone(),
@@ -480,6 +483,7 @@ mod tests {
         let hashes_per_batch = std::env::var("HASHES_PER_BATCH")
             .map(|x| x.parse().unwrap())
             .unwrap_or(DEFAULT_HASHES_PER_BATCH);
+        let (_record_sender, record_receiver) = unbounded();
         let poh_service = PohService::new(
             poh_recorder.clone(),
             &poh_config,

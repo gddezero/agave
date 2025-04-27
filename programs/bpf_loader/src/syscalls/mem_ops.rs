@@ -1,17 +1,31 @@
 use {
     super::*,
     solana_program_runtime::invoke_context::SerializedAccountMetadata,
-    solana_rbpf::{error::EbpfError, memory_region::MemoryRegion},
+    solana_sbpf::{error::EbpfError, memory_region::MemoryRegion},
     std::slice,
 };
 
 fn mem_op_consume(invoke_context: &mut InvokeContext, n: u64) -> Result<(), Error> {
-    let compute_budget = invoke_context.get_compute_budget();
-    let cost = compute_budget.mem_op_base_cost.max(
-        n.checked_div(compute_budget.cpi_bytes_per_unit)
+    let compute_cost = invoke_context.get_execution_cost();
+    let cost = compute_cost.mem_op_base_cost.max(
+        n.checked_div(compute_cost.cpi_bytes_per_unit)
             .unwrap_or(u64::MAX),
     );
     consume_compute_meter(invoke_context, cost)
+}
+
+/// Check that two regions do not overlap.
+pub(crate) fn is_nonoverlapping<N>(src: N, src_len: N, dst: N, dst_len: N) -> bool
+where
+    N: Ord + num_traits::SaturatingSub,
+{
+    // If the absolute distance between the ptrs is at least as big as the size of the other,
+    // they do not overlap.
+    if src > dst {
+        src.saturating_sub(&dst) >= dst_len
+    } else {
+        dst.saturating_sub(&src) >= src_len
+    }
 }
 
 declare_builtin_function!(
@@ -71,7 +85,7 @@ declare_builtin_function!(
 
         if invoke_context
             .get_feature_set()
-            .is_active(&solana_feature_set::bpf_account_data_direct_mapping::id())
+            .is_active(&agave_feature_set::bpf_account_data_direct_mapping::id())
         {
             let cmp_result = translate_type_mut::<i32>(
                 memory_mapping,
@@ -129,7 +143,7 @@ declare_builtin_function!(
 
         if invoke_context
             .get_feature_set()
-            .is_active(&solana_feature_set::bpf_account_data_direct_mapping::id())
+            .is_active(&agave_feature_set::bpf_account_data_direct_mapping::id())
         {
             let syscall_context = invoke_context.get_syscall_context()?;
 
@@ -156,7 +170,7 @@ fn memmove(
 ) -> Result<u64, Error> {
     if invoke_context
         .get_feature_set()
-        .is_active(&solana_feature_set::bpf_account_data_direct_mapping::id())
+        .is_active(&agave_feature_set::bpf_account_data_direct_mapping::id())
     {
         let syscall_context = invoke_context.get_syscall_context()?;
 
@@ -341,8 +355,7 @@ where
         src_addr,
         n_bytes,
         resize_area,
-    )
-    .map_err(EbpfError::from)?;
+    )?;
     let mut dst_chunk_iter = MemoryChunkIterator::new(
         memory_mapping,
         accounts,
@@ -350,8 +363,7 @@ where
         dst_addr,
         n_bytes,
         resize_area,
-    )
-    .map_err(EbpfError::from)?;
+    )?;
 
     let mut src_chunk = None;
     let mut dst_chunk = None;
@@ -532,7 +544,7 @@ impl<'a> Iterator for MemoryChunkIterator<'a> {
                     account_index = account_index.saturating_add(1);
                     self.account_index = Some(account_index);
                 } else {
-                    region_is_account = region.vm_addr == account_addr
+                    region_is_account = (account.original_data_len != 0 && region.vm_addr == account_addr)
                         // unaligned programs do not have a resize area
                         || (self.resize_area && region.vm_addr == resize_addr);
                     break;
@@ -570,7 +582,7 @@ impl<'a> Iterator for MemoryChunkIterator<'a> {
     }
 }
 
-impl<'a> DoubleEndedIterator for MemoryChunkIterator<'a> {
+impl DoubleEndedIterator for MemoryChunkIterator<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.vm_addr_start == self.vm_addr_end {
             return None;
@@ -606,7 +618,7 @@ impl<'a> DoubleEndedIterator for MemoryChunkIterator<'a> {
 
                 self.account_index = Some(account_index);
             } else {
-                region_is_account = region.vm_addr == account_addr
+                region_is_account = (account.original_data_len != 0 && region.vm_addr == account_addr)
                     // unaligned programs do not have a resize area
                     || (self.resize_area && region.vm_addr == resize_addr);
                 break;
@@ -644,7 +656,7 @@ mod tests {
     use {
         super::*,
         assert_matches::assert_matches,
-        solana_rbpf::{ebpf::MM_PROGRAM_START, program::SBPFVersion},
+        solana_sbpf::{ebpf::MM_RODATA_START, program::SBPFVersion},
         test_case::test_case,
     };
 
@@ -662,7 +674,7 @@ mod tests {
             aligned_memory_mapping: false,
             ..Config::default()
         };
-        let memory_mapping = MemoryMapping::new(vec![], &config, &SBPFVersion::V2).unwrap();
+        let memory_mapping = MemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
 
         let mut src_chunk_iter =
             MemoryChunkIterator::new(&memory_mapping, &[], AccessType::Load, 0, 1, true).unwrap();
@@ -676,7 +688,7 @@ mod tests {
             aligned_memory_mapping: false,
             ..Config::default()
         };
-        let memory_mapping = MemoryMapping::new(vec![], &config, &SBPFVersion::V2).unwrap();
+        let memory_mapping = MemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
 
         let mut src_chunk_iter =
             MemoryChunkIterator::new(&memory_mapping, &[], AccessType::Load, u64::MAX, 1, true)
@@ -692,9 +704,9 @@ mod tests {
         };
         let mem1 = vec![0xFF; 42];
         let memory_mapping = MemoryMapping::new(
-            vec![MemoryRegion::new_readonly(&mem1, MM_PROGRAM_START)],
+            vec![MemoryRegion::new_readonly(&mem1, MM_RODATA_START)],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -703,14 +715,14 @@ mod tests {
             &memory_mapping,
             &[],
             AccessType::Load,
-            MM_PROGRAM_START - 1,
+            MM_RODATA_START - 1,
             42,
             true,
         )
         .unwrap();
         assert_matches!(
             src_chunk_iter.next().unwrap().unwrap_err().downcast_ref().unwrap(),
-            EbpfError::AccessViolation(AccessType::Load, addr, 42, "unknown") if *addr == MM_PROGRAM_START - 1
+            EbpfError::AccessViolation(AccessType::Load, addr, 42, "unknown") if *addr == MM_RODATA_START - 1
         );
 
         // check oob at the upper bound. Since the memory mapping isn't empty,
@@ -719,7 +731,7 @@ mod tests {
             &memory_mapping,
             &[],
             AccessType::Load,
-            MM_PROGRAM_START,
+            MM_RODATA_START,
             43,
             true,
         )
@@ -727,7 +739,7 @@ mod tests {
         assert!(src_chunk_iter.next().unwrap().is_ok());
         assert_matches!(
             src_chunk_iter.next().unwrap().unwrap_err().downcast_ref().unwrap(),
-            EbpfError::AccessViolation(AccessType::Load, addr, 43, "program") if *addr == MM_PROGRAM_START
+            EbpfError::AccessViolation(AccessType::Load, addr, 43, "program") if *addr == MM_RODATA_START
         );
 
         // check oob at the upper bound on the first next_back()
@@ -735,7 +747,7 @@ mod tests {
             &memory_mapping,
             &[],
             AccessType::Load,
-            MM_PROGRAM_START,
+            MM_RODATA_START,
             43,
             true,
         )
@@ -743,7 +755,7 @@ mod tests {
         .rev();
         assert_matches!(
             src_chunk_iter.next().unwrap().unwrap_err().downcast_ref().unwrap(),
-            EbpfError::AccessViolation(AccessType::Load, addr, 43, "program") if *addr == MM_PROGRAM_START
+            EbpfError::AccessViolation(AccessType::Load, addr, 43, "program") if *addr == MM_RODATA_START
         );
 
         // check oob at the upper bound on the 2nd next_back()
@@ -751,7 +763,7 @@ mod tests {
             &memory_mapping,
             &[],
             AccessType::Load,
-            MM_PROGRAM_START - 1,
+            MM_RODATA_START - 1,
             43,
             true,
         )
@@ -760,7 +772,7 @@ mod tests {
         assert!(src_chunk_iter.next().unwrap().is_ok());
         assert_matches!(
             src_chunk_iter.next().unwrap().unwrap_err().downcast_ref().unwrap(),
-            EbpfError::AccessViolation(AccessType::Load, addr, 43, "unknown") if *addr == MM_PROGRAM_START - 1
+            EbpfError::AccessViolation(AccessType::Load, addr, 43, "unknown") if *addr == MM_RODATA_START - 1
         );
     }
 
@@ -772,9 +784,9 @@ mod tests {
         };
         let mem1 = vec![0xFF; 42];
         let memory_mapping = MemoryMapping::new(
-            vec![MemoryRegion::new_readonly(&mem1, MM_PROGRAM_START)],
+            vec![MemoryRegion::new_readonly(&mem1, MM_RODATA_START)],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -783,7 +795,7 @@ mod tests {
             &memory_mapping,
             &[],
             AccessType::Load,
-            MM_PROGRAM_START - 1,
+            MM_RODATA_START - 1,
             1,
             true,
         )
@@ -795,7 +807,7 @@ mod tests {
             &memory_mapping,
             &[],
             AccessType::Load,
-            MM_PROGRAM_START + 42,
+            MM_RODATA_START + 42,
             1,
             true,
         )
@@ -803,11 +815,11 @@ mod tests {
         assert!(src_chunk_iter.next().unwrap().is_err());
 
         for (vm_addr, len) in [
-            (MM_PROGRAM_START, 0),
-            (MM_PROGRAM_START + 42, 0),
-            (MM_PROGRAM_START, 1),
-            (MM_PROGRAM_START, 42),
-            (MM_PROGRAM_START + 41, 1),
+            (MM_RODATA_START, 0),
+            (MM_RODATA_START + 42, 0),
+            (MM_RODATA_START, 1),
+            (MM_RODATA_START, 42),
+            (MM_RODATA_START + 41, 1),
         ] {
             for rev in [true, false] {
                 let iter = MemoryChunkIterator::new(
@@ -843,22 +855,22 @@ mod tests {
         let mem2 = vec![0x22; 4];
         let memory_mapping = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, MM_PROGRAM_START),
-                MemoryRegion::new_readonly(&mem2, MM_PROGRAM_START + 8),
+                MemoryRegion::new_readonly(&mem1, MM_RODATA_START),
+                MemoryRegion::new_readonly(&mem2, MM_RODATA_START + 8),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
         for (vm_addr, len, mut expected) in [
-            (MM_PROGRAM_START, 8, vec![(MM_PROGRAM_START, 8)]),
+            (MM_RODATA_START, 8, vec![(MM_RODATA_START, 8)]),
             (
-                MM_PROGRAM_START + 7,
+                MM_RODATA_START + 7,
                 2,
-                vec![(MM_PROGRAM_START + 7, 1), (MM_PROGRAM_START + 8, 1)],
+                vec![(MM_RODATA_START + 7, 1), (MM_RODATA_START + 8, 1)],
             ),
-            (MM_PROGRAM_START + 8, 4, vec![(MM_PROGRAM_START + 8, 4)]),
+            (MM_RODATA_START + 8, 4, vec![(MM_RODATA_START + 8, 4)]),
         ] {
             for rev in [false, true] {
                 let iter = MemoryChunkIterator::new(
@@ -892,11 +904,11 @@ mod tests {
         let mem2 = vec![0x22; 4];
         let memory_mapping = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, MM_PROGRAM_START),
-                MemoryRegion::new_readonly(&mem2, MM_PROGRAM_START + 8),
+                MemoryRegion::new_readonly(&mem1, MM_RODATA_START),
+                MemoryRegion::new_readonly(&mem2, MM_RODATA_START + 8),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -904,9 +916,9 @@ mod tests {
         assert_matches!(
             iter_memory_pair_chunks(
                 AccessType::Load,
-                MM_PROGRAM_START,
+                MM_RODATA_START,
                 AccessType::Load,
-                MM_PROGRAM_START + 8,
+                MM_RODATA_START + 8,
                 8,
                 &[],
                 &memory_mapping,
@@ -914,16 +926,16 @@ mod tests {
                 true,
                 |_src, _dst, _len| Ok::<_, Error>(0),
             ).unwrap_err().downcast_ref().unwrap(),
-            EbpfError::AccessViolation(AccessType::Load, addr, 8, "program") if *addr == MM_PROGRAM_START + 8
+            EbpfError::AccessViolation(AccessType::Load, addr, 8, "program") if *addr == MM_RODATA_START + 8
         );
 
         // src is shorter than dst
         assert_matches!(
             iter_memory_pair_chunks(
                 AccessType::Load,
-                MM_PROGRAM_START + 10,
+                MM_RODATA_START + 10,
                 AccessType::Load,
-                MM_PROGRAM_START + 2,
+                MM_RODATA_START + 2,
                 3,
                 &[],
                 &memory_mapping,
@@ -931,7 +943,7 @@ mod tests {
                 true,
                 |_src, _dst, _len| Ok::<_, Error>(0),
             ).unwrap_err().downcast_ref().unwrap(),
-            EbpfError::AccessViolation(AccessType::Load, addr, 3, "program") if *addr == MM_PROGRAM_START + 10
+            EbpfError::AccessViolation(AccessType::Load, addr, 3, "program") if *addr == MM_RODATA_START + 10
         );
     }
 
@@ -946,17 +958,17 @@ mod tests {
         let mem2 = vec![0x22; 4];
         let memory_mapping = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, MM_PROGRAM_START),
-                MemoryRegion::new_readonly(&mem2, MM_PROGRAM_START + 8),
+                MemoryRegion::new_readonly(&mem1, MM_RODATA_START),
+                MemoryRegion::new_readonly(&mem2, MM_RODATA_START + 8),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
         memmove_non_contiguous(
-            MM_PROGRAM_START,
-            MM_PROGRAM_START + 8,
+            MM_RODATA_START,
+            MM_RODATA_START + 8,
             4,
             &[],
             &memory_mapping,
@@ -1006,8 +1018,8 @@ mod tests {
 
         // do our memmove
         memmove_non_contiguous(
-            MM_PROGRAM_START + dst_offset as u64,
-            MM_PROGRAM_START + src_offset as u64,
+            MM_RODATA_START + dst_offset as u64,
+            MM_RODATA_START + src_offset as u64,
             len as u64,
             &[],
             &memory_mapping,
@@ -1033,16 +1045,16 @@ mod tests {
         let mem2 = vec![0x22; 4];
         let memory_mapping = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, MM_PROGRAM_START),
-                MemoryRegion::new_readonly(&mem2, MM_PROGRAM_START + 8),
+                MemoryRegion::new_writable(&mut mem1, MM_RODATA_START),
+                MemoryRegion::new_readonly(&mem2, MM_RODATA_START + 8),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
         assert_eq!(
-            memset_non_contiguous(MM_PROGRAM_START, 0x33, 9, &[], &memory_mapping, true).unwrap(),
+            memset_non_contiguous(MM_RODATA_START, 0x33, 9, &[], &memory_mapping, true).unwrap(),
             0
         );
     }
@@ -1059,18 +1071,18 @@ mod tests {
         let mut mem4 = vec![0x44; 4];
         let memory_mapping = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, MM_PROGRAM_START),
-                MemoryRegion::new_writable(&mut mem2, MM_PROGRAM_START + 1),
-                MemoryRegion::new_writable(&mut mem3, MM_PROGRAM_START + 3),
-                MemoryRegion::new_writable(&mut mem4, MM_PROGRAM_START + 6),
+                MemoryRegion::new_readonly(&mem1, MM_RODATA_START),
+                MemoryRegion::new_writable(&mut mem2, MM_RODATA_START + 1),
+                MemoryRegion::new_writable(&mut mem3, MM_RODATA_START + 3),
+                MemoryRegion::new_writable(&mut mem4, MM_RODATA_START + 6),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
         assert_eq!(
-            memset_non_contiguous(MM_PROGRAM_START + 1, 0x55, 7, &[], &memory_mapping, true)
+            memset_non_contiguous(MM_RODATA_START + 1, 0x55, 7, &[], &memory_mapping, true)
                 .unwrap(),
             0
         );
@@ -1091,20 +1103,20 @@ mod tests {
         let mem3 = b"foobarbad".to_vec();
         let memory_mapping = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, MM_PROGRAM_START),
-                MemoryRegion::new_readonly(&mem2, MM_PROGRAM_START + 3),
-                MemoryRegion::new_readonly(&mem3, MM_PROGRAM_START + 9),
+                MemoryRegion::new_readonly(&mem1, MM_RODATA_START),
+                MemoryRegion::new_readonly(&mem2, MM_RODATA_START + 3),
+                MemoryRegion::new_readonly(&mem3, MM_RODATA_START + 9),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
         // non contiguous src
         assert_eq!(
             memcmp_non_contiguous(
-                MM_PROGRAM_START,
-                MM_PROGRAM_START + 9,
+                MM_RODATA_START,
+                MM_RODATA_START + 9,
                 9,
                 &[],
                 &memory_mapping,
@@ -1117,8 +1129,8 @@ mod tests {
         // non contiguous dst
         assert_eq!(
             memcmp_non_contiguous(
-                MM_PROGRAM_START + 10,
-                MM_PROGRAM_START + 1,
+                MM_RODATA_START + 10,
+                MM_RODATA_START + 1,
                 8,
                 &[],
                 &memory_mapping,
@@ -1131,8 +1143,8 @@ mod tests {
         // diff
         assert_eq!(
             memcmp_non_contiguous(
-                MM_PROGRAM_START + 1,
-                MM_PROGRAM_START + 11,
+                MM_RODATA_START + 1,
+                MM_RODATA_START + 11,
                 5,
                 &[],
                 &memory_mapping,
@@ -1158,17 +1170,32 @@ mod tests {
             );
             regs.push(MemoryRegion::new_writable(
                 &mut mem[i],
-                MM_PROGRAM_START + offset as u64,
+                MM_RODATA_START + offset as u64,
             ));
             offset += *region_len;
         }
 
-        let memory_mapping = MemoryMapping::new(regs, config, &SBPFVersion::V2).unwrap();
+        let memory_mapping = MemoryMapping::new(regs, config, SBPFVersion::V3).unwrap();
 
         (mem, memory_mapping)
     }
 
     fn flatten_memory(mem: &[Vec<u8>]) -> Vec<u8> {
         mem.iter().flatten().copied().collect()
+    }
+
+    #[test]
+    fn test_is_nonoverlapping() {
+        for dst in 0..8 {
+            assert!(is_nonoverlapping(10, 3, dst, 3));
+        }
+        for dst in 8..13 {
+            assert!(!is_nonoverlapping(10, 3, dst, 3));
+        }
+        for dst in 13..20 {
+            assert!(is_nonoverlapping(10, 3, dst, 3));
+        }
+        assert!(is_nonoverlapping::<u8>(255, 3, 254, 1));
+        assert!(!is_nonoverlapping::<u8>(255, 2, 254, 3));
     }
 }

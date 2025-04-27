@@ -3,6 +3,7 @@ use {
         create_executable_environment, LoadAndExecuteTransactionsOutput, MockBankCallback,
         MockForkGraph, TransactionBatch,
     },
+    agave_reserved_account_keys::ReservedAccountKeys,
     base64::{prelude::BASE64_STANDARD, Engine},
     bincode::config::Options,
     jsonrpc_core::{types::error, Error, Metadata, Result},
@@ -11,21 +12,22 @@ use {
     serde_json,
     solana_account_decoder::{
         encode_ui_account,
-        parse_account_data::{AccountAdditionalDataV2, SplTokenAdditionalData},
+        parse_account_data::{AccountAdditionalDataV3, SplTokenAdditionalDataV2},
         parse_token::{get_token_account_mint, is_known_spl_token_id},
         UiAccount, UiAccountEncoding, UiDataSliceConfig, MAX_BASE58_BYTES,
     },
-    solana_accounts_db::blockhash_queue::BlockhashQueue,
-    solana_compute_budget::compute_budget::ComputeBudget,
     solana_perf::packet::PACKET_DATA_SIZE,
-    solana_program_runtime::loaded_programs::ProgramCacheEntry,
+    solana_program_runtime::{
+        execution_budget::SVMTransactionExecutionAndFeeBudgetLimits,
+        loaded_programs::ProgramCacheEntry,
+    },
     solana_rpc_client_api::{
         config::*,
         response::{Response as RpcResponse, *},
     },
     solana_sdk::{
         account::{from_account, Account, AccountSharedData, ReadableAccount},
-        clock::{Epoch, Slot, MAX_PROCESSING_AGE, MAX_TRANSACTION_FORWARDING_DELAY},
+        clock::{Slot, MAX_PROCESSING_AGE, MAX_TRANSACTION_FORWARDING_DELAY},
         commitment_config::CommitmentConfig,
         exit::Exit,
         hash::Hash,
@@ -36,14 +38,12 @@ use {
         },
         nonce::state::DurableNonce,
         pubkey::Pubkey,
-        reserved_account_keys::ReservedAccountKeys,
         signature::Signature,
         system_instruction, sysvar,
         transaction::{
             AddressLoader, MessageHash, SanitizedTransaction, TransactionError,
             VersionedTransaction,
         },
-        transaction_context::{TransactionAccount, TransactionReturnData},
     },
     solana_svm::{
         account_loader::{CheckedTransactionDetails, TransactionCheckResult},
@@ -58,15 +58,15 @@ use {
         },
     },
     solana_system_program::system_processor,
+    solana_transaction_context::{TransactionAccount, TransactionReturnData},
     solana_transaction_status::{
         map_inner_instructions, parse_ui_inner_instructions, TransactionBinaryEncoding,
         UiTransactionEncoding,
     },
-    solana_vote::vote_account::VoteAccountsHashMap,
     spl_token_2022::{
         extension::{
-            interest_bearing_mint::InterestBearingConfig, BaseStateWithExtensions,
-            StateWithExtensions,
+            interest_bearing_mint::InterestBearingConfig, scaled_ui_amount::ScaledUiAmountConfig,
+            BaseStateWithExtensions, StateWithExtensions,
         },
         state::Mint,
     },
@@ -326,7 +326,6 @@ impl JsonRpcRequestProcessor {
             TransactionProcessingConfig {
                 account_overrides: Some(&account_overrides),
                 check_program_modification_slot: false,
-                compute_budget: Some(ComputeBudget::default()),
                 log_messages_bytes_limit: None,
                 limit_to_load_programs: true,
                 recording_config: ExecutionRecordingConfig {
@@ -334,7 +333,6 @@ impl JsonRpcRequestProcessor {
                     enable_log_recording: true,
                     enable_return_data_recording: true,
                 },
-                transaction_account_lock_limit: Some(64),
             },
         );
 
@@ -380,7 +378,7 @@ impl JsonRpcRequestProcessor {
     fn prepare_unlocked_batch_from_single_tx<'a>(
         &'a self,
         transaction: &'a SanitizedTransaction,
-    ) -> TransactionBatch<'_> {
+    ) -> TransactionBatch<'a> {
         let tx_account_lock_limit = solana_sdk::transaction::MAX_TX_ACCOUNT_LOCKS;
         let lock_result = transaction
             .get_account_locks(tx_account_lock_limit)
@@ -400,7 +398,6 @@ impl JsonRpcRequestProcessor {
         error_counters: &mut TransactionErrorMetrics,
     ) -> Vec<TransactionCheckResult> {
         let last_blockhash = Hash::default();
-        let blockhash_queue = BlockhashQueue::default();
         let next_durable_nonce = DurableNonce::from_blockhash(&last_blockhash);
 
         sanitized_txs
@@ -411,7 +408,6 @@ impl JsonRpcRequestProcessor {
                     tx.borrow(),
                     max_age,
                     &next_durable_nonce,
-                    &blockhash_queue,
                     error_counters,
                 ),
                 Err(e) => Err(e.clone()),
@@ -424,27 +420,18 @@ impl JsonRpcRequestProcessor {
         _tx: &SanitizedTransaction,
         _max_age: usize,
         _next_durable_nonce: &DurableNonce,
-        _hash_queue: &BlockhashQueue,
         _error_counters: &mut TransactionErrorMetrics,
     ) -> TransactionCheckResult {
         /* for now just return defaults */
-        Ok(CheckedTransactionDetails {
-            nonce: None,
-            lamports_per_signature: u64::default(),
-        })
+        Ok(CheckedTransactionDetails::new(
+            None,
+            Ok(SVMTransactionExecutionAndFeeBudgetLimits::default()),
+        ))
     }
 
     fn clock(&self) -> sysvar::clock::Clock {
         from_account(&self.get_account(&sysvar::clock::id()).unwrap_or_default())
             .unwrap_or_default()
-    }
-
-    fn epoch_total_stake(&self, _epoch: Epoch) -> Option<u64> {
-        Some(u64::default())
-    }
-
-    fn epoch_vote_accounts(&self, _epoch: Epoch) -> Option<&VoteAccountsHashMap> {
-        None
     }
 
     fn get_account(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
@@ -453,7 +440,7 @@ impl JsonRpcRequestProcessor {
         account_map.get(pubkey).cloned()
     }
 
-    fn get_additional_mint_data(&self, data: &[u8]) -> Result<SplTokenAdditionalData> {
+    fn get_additional_mint_data(&self, data: &[u8]) -> Result<SplTokenAdditionalDataV2> {
         StateWithExtensions::<Mint>::unpack(data)
             .map_err(|_| {
                 Error::invalid_params("Invalid param: Token mint could not be unpacked".to_string())
@@ -463,9 +450,14 @@ impl JsonRpcRequestProcessor {
                     .get_extension::<InterestBearingConfig>()
                     .map(|x| (*x, self.clock().unix_timestamp))
                     .ok();
-                SplTokenAdditionalData {
+                let scaled_ui_amount_config = mint
+                    .get_extension::<ScaledUiAmountConfig>()
+                    .map(|x| (*x, self.clock().unix_timestamp))
+                    .ok();
+                SplTokenAdditionalDataV2 {
                     decimals: mint.base.decimals,
                     interest_bearing_config,
+                    scaled_ui_amount_config,
                 }
             })
     }
@@ -510,7 +502,7 @@ impl JsonRpcRequestProcessor {
                     .or_else(|| self.get_account(&mint_pubkey))
             })
             .and_then(|mint_account| self.get_additional_mint_data(mint_account.data()).ok())
-            .map(|data| AccountAdditionalDataV2 {
+            .map(|data| AccountAdditionalDataV3 {
                 spl_token_additional_data: Some(data),
             });
 
@@ -550,11 +542,9 @@ impl JsonRpcRequestProcessor {
         let (blockhash, lamports_per_signature) = self.last_blockhash_and_lamports_per_signature();
         let processing_environment = TransactionProcessingEnvironment {
             blockhash,
-            epoch_total_stake: self.epoch_total_stake(Epoch::default()),
-            epoch_vote_accounts: self.epoch_vote_accounts(Epoch::default()),
+            blockhash_lamports_per_signature: lamports_per_signature,
+            epoch_total_stake: 0,
             feature_set: Arc::clone(&bank.feature_set),
-            fee_structure: None,
-            lamports_per_signature,
             rent_collector: None,
         };
 
@@ -596,7 +586,7 @@ impl JsonRpcRequestProcessor {
                     processed_counts.processed_with_successful_result_count += 1;
                 }
                 Err(err) => {
-                    if *err_count == 0 {
+                    if err_count.0 == 0 {
                         debug!("tx error: {:?} {:?}", err, tx);
                     }
                     *err_count += 1;

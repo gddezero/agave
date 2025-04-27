@@ -8,31 +8,30 @@
 )]
 
 use {
-    solana_feature_set::bpf_account_data_direct_mapping, solana_rbpf::memory_region::MemoryState,
+    agave_feature_set::bpf_account_data_direct_mapping, solana_sbpf::memory_region::MemoryState,
     solana_sdk::signer::keypair::Keypair, std::slice,
 };
 
 extern crate test;
 
 use {
+    agave_feature_set::FeatureSet,
     byteorder::{ByteOrder, LittleEndian, WriteBytesExt},
-    solana_bpf_loader_program::{
-        create_vm, serialization::serialize_parameters,
-        syscalls::create_program_runtime_environment_v1,
-    },
-    solana_compute_budget::compute_budget::ComputeBudget,
-    solana_feature_set::FeatureSet,
+    solana_bpf_loader_program::{create_vm, syscalls::create_program_runtime_environment_v1},
     solana_measure::measure::Measure,
-    solana_program_runtime::invoke_context::InvokeContext,
-    solana_rbpf::{
-        ebpf::MM_INPUT_START, elf::Executable, memory_region::MemoryRegion,
-        verifier::RequisiteVerifier, vm::ContextObject,
+    solana_program_runtime::{
+        execution_budget::SVMTransactionExecutionBudget, invoke_context::InvokeContext,
+        serialization::serialize_parameters,
     },
     solana_runtime::{
         bank::Bank,
         bank_client::BankClient,
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
-        loader_utils::{load_program_from_file, load_upgradeable_program_and_advance_slot},
+        loader_utils::{load_program_from_file, load_program_of_loader_v4},
+    },
+    solana_sbpf::{
+        ebpf::MM_INPUT_START, elf::Executable, memory_region::MemoryRegion,
+        verifier::RequisiteVerifier, vm::ContextObject,
     },
     solana_sdk::{
         account::AccountSharedData,
@@ -44,8 +43,8 @@ use {
         native_loader,
         pubkey::Pubkey,
         signature::Signer,
-        transaction_context::InstructionAccount,
     },
+    solana_transaction_context::InstructionAccount,
     std::{mem, sync::Arc},
     test::Bencher,
 };
@@ -94,7 +93,7 @@ fn bench_program_create_executable(bencher: &mut Bencher) {
 
     let program_runtime_environment = create_program_runtime_environment_v1(
         &FeatureSet::default(),
-        &ComputeBudget::default(),
+        &SVMTransactionExecutionBudget::default(),
         true,
         false,
     );
@@ -120,7 +119,7 @@ fn bench_program_alu(bencher: &mut Bencher) {
 
     let program_runtime_environment = create_program_runtime_environment_v1(
         invoke_context.get_feature_set(),
-        &ComputeBudget::default(),
+        &SVMTransactionExecutionBudget::default(),
         true,
         false,
     );
@@ -201,9 +200,9 @@ fn bench_program_execute_noop(bencher: &mut Bencher) {
     let authority_keypair = Keypair::new();
     let mint_pubkey = mint_keypair.pubkey();
 
-    let (_, invoke_program_id) = load_upgradeable_program_and_advance_slot(
+    let (_bank, invoke_program_id) = load_program_of_loader_v4(
         &mut bank_client,
-        bank_forks.as_ref(),
+        &bank_forks,
         &mint_keypair,
         &authority_keypair,
         "noop",
@@ -239,7 +238,7 @@ fn bench_create_vm(bencher: &mut Bencher) {
         .is_active(&bpf_account_data_direct_mapping::id());
     let program_runtime_environment = create_program_runtime_environment_v1(
         invoke_context.get_feature_set(),
-        &ComputeBudget::default(),
+        &SVMTransactionExecutionBudget::default(),
         true,
         false,
     );
@@ -256,7 +255,8 @@ fn bench_create_vm(bencher: &mut Bencher) {
             .transaction_context
             .get_current_instruction_context()
             .unwrap(),
-        !direct_mapping, // copy_account_data,
+        !direct_mapping, // copy_account_data
+        true,            // mask_out_rent_epoch_in_vm_serialization
     )
     .unwrap();
 
@@ -291,12 +291,13 @@ fn bench_instruction_count_tuner(_bencher: &mut Bencher) {
             .get_current_instruction_context()
             .unwrap(),
         !direct_mapping, // copy_account_data
+        true,            // mask_out_rent_epoch_in_vm_serialization
     )
     .unwrap();
 
     let program_runtime_environment = create_program_runtime_environment_v1(
         invoke_context.get_feature_set(),
-        &ComputeBudget::default(),
+        &SVMTransactionExecutionBudget::default(),
         true,
         false,
     );

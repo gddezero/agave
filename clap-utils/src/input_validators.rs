@@ -1,12 +1,11 @@
 use {
     crate::keypair::{parse_signer_source, SignerSourceKind, ASK_KEYWORD},
     chrono::DateTime,
-    solana_sdk::{
-        clock::{Epoch, Slot},
-        hash::Hash,
-        pubkey::{Pubkey, MAX_SEED_LEN},
-        signature::{read_keypair_file, Signature},
-    },
+    solana_clock::{Epoch, Slot},
+    solana_hash::Hash,
+    solana_keypair::read_keypair_file,
+    solana_pubkey::{Pubkey, MAX_SEED_LEN},
+    solana_signature::Signature,
     std::{fmt::Display, ops::RangeBounds, str::FromStr},
 };
 
@@ -294,6 +293,23 @@ where
     if amount.as_ref().parse::<u64>().is_ok()
         || amount.as_ref().parse::<f64>().is_ok()
         || amount.as_ref() == "ALL"
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unable to parse input amount as integer or float, provided: {amount}"
+        ))
+    }
+}
+
+pub fn is_amount_or_all_or_available<T>(amount: T) -> Result<(), String>
+where
+    T: AsRef<str> + Display,
+{
+    if amount.as_ref().parse::<u64>().is_ok()
+        || amount.as_ref().parse::<f64>().is_ok()
+        || amount.as_ref() == "ALL"
+        || amount.as_ref() == "AVAILABLE"
     {
         Ok(())
     } else {

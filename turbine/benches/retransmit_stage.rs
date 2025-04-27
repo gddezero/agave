@@ -18,6 +18,7 @@ use {
         shred::{ProcessShredsStats, ReedSolomonCache, Shredder},
     },
     solana_measure::measure::Measure,
+    solana_net_utils::bind_to_unspecified,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk::{
         hash::Hash,
@@ -27,10 +28,10 @@ use {
         timing::timestamp,
     },
     solana_streamer::socket::SocketAddrSpace,
-    solana_turbine::retransmit_stage::retransmitter,
+    solana_turbine::retransmit_stage::RetransmitStage,
     std::{
         iter::repeat_with,
-        net::{Ipv4Addr, UdpSocket},
+        net::Ipv4Addr,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -59,10 +60,12 @@ fn bench_retransmitter(bencher: &mut Bencher) {
     const NUM_PEERS: usize = 4;
     let peer_sockets: Vec<_> = repeat_with(|| {
         let id = Pubkey::new_unique();
-        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let socket = bind_to_unspecified().unwrap();
         let mut contact_info = ContactInfo::new_localhost(&id, timestamp());
         let port = socket.local_addr().unwrap().port();
-        contact_info.set_tvu((Ipv4Addr::LOCALHOST, port)).unwrap();
+        contact_info
+            .set_tvu(Protocol::UDP, (Ipv4Addr::LOCALHOST, port))
+            .unwrap();
         info!("local: {:?}", contact_info.tvu(Protocol::UDP).unwrap());
         cluster_info.insert_info(contact_info);
         socket.set_nonblocking(true).unwrap();
@@ -80,7 +83,7 @@ fn bench_retransmitter(bencher: &mut Bencher) {
     let (shreds_sender, shreds_receiver) = unbounded();
     const NUM_THREADS: usize = 2;
     let sockets = (0..NUM_THREADS)
-        .map(|_| UdpSocket::bind("0.0.0.0:0").unwrap())
+        .map(|_| bind_to_unspecified().unwrap())
         .collect();
 
     let leader_schedule_cache = Arc::new(LeaderScheduleCache::new_from_bank(&bank));
@@ -117,14 +120,14 @@ fn bench_retransmitter(bencher: &mut Bencher) {
 
     let num_packets = data_shreds.len();
 
-    let retransmitter_handles = retransmitter(
-        Arc::new(sockets),
-        quic_endpoint_sender,
+    let retransmit_stage = RetransmitStage::new(
         bank_forks,
         leader_schedule_cache,
         cluster_info,
+        Arc::new(sockets),
+        quic_endpoint_sender,
         shreds_receiver,
-        Arc::default(), // solana_rpc::max_slots::MaxSlots
+        Arc::new(solana_rpc::max_slots::MaxSlots::default()),
         None,
         None,
     );
@@ -180,5 +183,5 @@ fn bench_retransmitter(bencher: &mut Bencher) {
         total.store(0, Ordering::Relaxed);
     });
 
-    retransmitter_handles.join().unwrap();
+    retransmit_stage.join().unwrap();
 }

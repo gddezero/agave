@@ -9,6 +9,7 @@ use {
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
         prioritization_fee_cache::*,
     },
+    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_sdk::{
         compute_budget::ComputeBudgetInstruction,
         message::Message,
@@ -25,7 +26,7 @@ fn build_sanitized_transaction(
     compute_unit_price: u64,
     signer_account: &Pubkey,
     write_account: &Pubkey,
-) -> SanitizedTransaction {
+) -> RuntimeTransaction<SanitizedTransaction> {
     let transfer_lamports = 1;
     let transaction = Transaction::new_unsigned(Message::new(
         &[
@@ -36,7 +37,7 @@ fn build_sanitized_transaction(
         Some(signer_account),
     ));
 
-    SanitizedTransaction::from_transaction_for_tests(transaction)
+    RuntimeTransaction::from_transaction_for_tests(transaction)
 }
 
 #[bench]
@@ -102,7 +103,7 @@ fn bench_process_transactions_multiple_slots(bencher: &mut Bencher) {
     let bank0 = Bank::new_for_benches(&genesis_config);
     let bank_forks = BankForks::new_rw_arc(bank0);
     let bank = bank_forks.read().unwrap().working_bank();
-    let collector = solana_sdk::pubkey::new_rand();
+    let collector = solana_pubkey::new_rand();
     let banks = (1..=NUM_SLOTS)
         .map(|n| Arc::new(Bank::new_from_parent(bank.clone(), &collector, n as u64)))
         .collect::<Vec<_>>();

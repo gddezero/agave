@@ -6,12 +6,17 @@
 //! - the `percentage` amount is equal to a constant (referred to as the `max_value`)
 //! - the `delta` and `claimed` amounts are equal
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 #[cfg(not(target_os = "solana"))]
 use {
     crate::{
         encryption::pedersen::{PedersenCommitment, PedersenOpening},
         sigma_proofs::percentage_with_cap::PercentageWithCapProof,
-        zk_elgamal_proof_program::errors::{ProofGenerationError, ProofVerificationError},
+        zk_elgamal_proof_program::{
+            errors::{ProofGenerationError, ProofVerificationError},
+            proof_data::errors::ProofDataError,
+        },
     },
     bytemuck::bytes_of,
     merlin::Transcript,
@@ -22,7 +27,7 @@ use {
         encryption::pod::pedersen::PodPedersenCommitment,
         pod::PodU64,
         sigma_proofs::pod::PodPercentageWithCapProof,
-        zk_elgamal_proof_program::proof_data::{ProofType, ZkProofData},
+        zk_elgamal_proof_program::proof_data::{pod::impl_wasm_to_bytes, ProofType, ZkProofData},
     },
     bytemuck_derive::{Pod, Zeroable},
 };
@@ -32,6 +37,7 @@ use {
 ///
 /// It includes the cryptographic proof as well as the context data information needed to verify
 /// the proof.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PercentageWithCapProofData {
@@ -46,6 +52,7 @@ pub struct PercentageWithCapProofData {
 /// computed.
 ///
 /// [`ZK ElGamal proof`]: https://docs.solanalabs.com/runtime/zk-token-proof
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PercentageWithCapProofContext {
@@ -63,6 +70,7 @@ pub struct PercentageWithCapProofContext {
 }
 
 #[cfg(not(target_os = "solana"))]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl PercentageWithCapProofData {
     pub fn new(
         percentage_commitment: &PedersenCommitment,
@@ -107,6 +115,8 @@ impl PercentageWithCapProofData {
     }
 }
 
+impl_wasm_to_bytes!(TYPE = PercentageWithCapProofData);
+
 impl ZkProofData<PercentageWithCapProofContext> for PercentageWithCapProofData {
     const PROOF_TYPE: ProofType = ProofType::PercentageWithCap;
 
@@ -150,6 +160,8 @@ impl PercentageWithCapProofContext {
         transcript
     }
 }
+
+impl_wasm_to_bytes!(TYPE = PercentageWithCapProofContext);
 
 #[cfg(test)]
 mod test {

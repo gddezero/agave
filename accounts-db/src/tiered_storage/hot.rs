@@ -22,12 +22,10 @@ use {
     bytemuck_derive::{Pod, Zeroable},
     memmap2::{Mmap, MmapOptions},
     modular_bitfield::prelude::*,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount, WritableAccount},
-        pubkey::Pubkey,
-        rent_collector::RENT_EXEMPT_RENT_EPOCH,
-        stake_history::Epoch,
-    },
+    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    solana_clock::Epoch,
+    solana_pubkey::Pubkey,
+    solana_rent_collector::RENT_EXEMPT_RENT_EPOCH,
     std::{io::Write, option::Option, path::Path},
 };
 
@@ -39,7 +37,7 @@ pub const HOT_FORMAT: TieredStorageFormat = TieredStorageFormat {
     account_block_format: AccountBlockFormat::AlignedRaw,
 };
 
-/// An helper function that creates a new default footer for hot
+/// A helper function that creates a new default footer for hot
 /// accounts storage.
 fn new_hot_footer() -> TieredStorageFooter {
     TieredStorageFooter {
@@ -380,7 +378,7 @@ impl HotStorageReader {
         self.mmap.len()
     }
 
-    /// Returns whether the nderlying storage is empty.
+    /// Returns whether the underlying storage is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -833,10 +831,10 @@ mod tests {
         assert_matches::assert_matches,
         memoffset::offset_of,
         rand::{seq::SliceRandom, Rng},
-        solana_sdk::{
-            account::ReadableAccount, hash::Hash, pubkey::Pubkey, slot_history::Slot,
-            stake_history::Epoch,
-        },
+        solana_account::ReadableAccount,
+        solana_clock::{Epoch, Slot},
+        solana_hash::Hash,
+        solana_pubkey::Pubkey,
         std::path::PathBuf,
         tempfile::TempDir,
     };
@@ -853,7 +851,7 @@ mod tests {
         datas: Vec<Vec<u8>>,
         /// path to the hot storage file that was written
         file_path: PathBuf,
-        /// temp directory where the the hot storage file was written
+        /// temp directory where the hot storage file was written
         temp_dir: TempDir,
     }
 

@@ -16,27 +16,26 @@ use {
     inflector::cases::titlecase::to_title_case,
     serde::{Deserialize, Serialize},
     serde_json::{Map, Value},
+    solana_account::ReadableAccount,
     solana_account_decoder::{
-        encode_ui_account, parse_account_data::AccountAdditionalDataV2,
+        encode_ui_account, parse_account_data::AccountAdditionalDataV3,
         parse_token::UiTokenAccount, UiAccountEncoding, UiDataSliceConfig,
     },
     solana_clap_utils::keypair::SignOnly,
+    solana_clock::{Epoch, Slot, UnixTimestamp},
+    solana_epoch_info::EpochInfo,
+    solana_hash::Hash,
+    solana_native_token::lamports_to_sol,
+    solana_program::stake::state::{Authorized, Lockup},
+    solana_pubkey::Pubkey,
     solana_rpc_client_api::response::{
         RpcAccountBalance, RpcContactInfo, RpcInflationGovernor, RpcInflationRate, RpcKeyedAccount,
         RpcSupply, RpcVoteAccountInfo,
     },
-    solana_sdk::{
-        account::ReadableAccount,
-        clock::{Epoch, Slot, UnixTimestamp},
-        epoch_info::EpochInfo,
-        hash::Hash,
-        native_token::lamports_to_sol,
-        pubkey::Pubkey,
-        signature::Signature,
-        stake::state::{Authorized, Lockup},
-        stake_history::StakeHistoryEntry,
-        transaction::{Transaction, TransactionError, VersionedTransaction},
-    },
+    solana_signature::Signature,
+    solana_sysvar::stake_history::StakeHistoryEntry,
+    solana_transaction::{versioned::VersionedTransaction, Transaction},
+    solana_transaction_error::TransactionError,
     solana_transaction_status::{
         EncodedConfirmedBlock, EncodedTransaction, TransactionConfirmationStatus,
         UiTransactionStatusMeta,
@@ -159,7 +158,7 @@ pub struct CliAccount {
 
 pub struct CliAccountNewConfig {
     pub data_encoding: UiAccountEncoding,
-    pub additional_data: Option<AccountAdditionalDataV2>,
+    pub additional_data: Option<AccountAdditionalDataV3>,
     pub data_slice_config: Option<UiDataSliceConfig>,
     pub use_lamports_unit: bool,
 }
@@ -1021,11 +1020,19 @@ pub struct CliKeyedEpochReward {
     pub reward: Option<CliEpochReward>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CliEpochRewardsMetadata {
     pub epoch: Epoch,
+    #[deprecated(
+        since = "2.2.0",
+        note = "Please use CliEpochReward::effective_slot per reward"
+    )]
     pub effective_slot: Slot,
+    #[deprecated(
+        since = "2.2.0",
+        note = "Please use CliEpochReward::block_time per reward"
+    )]
     pub block_time: UnixTimestamp,
 }
 
@@ -1038,7 +1045,59 @@ pub struct CliKeyedEpochRewards {
 }
 
 impl QuietDisplay for CliKeyedEpochRewards {}
-impl VerboseDisplay for CliKeyedEpochRewards {}
+impl VerboseDisplay for CliKeyedEpochRewards {
+    fn write_str(&self, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        if self.rewards.is_empty() {
+            writeln!(w, "No rewards found in epoch")?;
+            return Ok(());
+        }
+
+        if let Some(metadata) = &self.epoch_metadata {
+            writeln!(w, "Epoch: {}", metadata.epoch)?;
+        }
+        writeln!(w, "Epoch Rewards:")?;
+        writeln!(
+            w,
+            "  {:<44}  {:<11}  {:<23}  {:<18}  {:<20}  {:>14}  {:>7}  {:>10}",
+            "Address",
+            "Reward Slot",
+            "Time",
+            "Amount",
+            "New Balance",
+            "Percent Change",
+            "APR",
+            "Commission"
+        )?;
+        for keyed_reward in &self.rewards {
+            match &keyed_reward.reward {
+                Some(reward) => {
+                    writeln!(
+                        w,
+                        "  {:<44}  {:<11}  {:<23}  ◎{:<17.9}  ◎{:<19.9}  {:>13.9}%  {:>7}  {:>10}",
+                        keyed_reward.address,
+                        reward.effective_slot,
+                        Utc.timestamp_opt(reward.block_time, 0).unwrap(),
+                        lamports_to_sol(reward.amount),
+                        lamports_to_sol(reward.post_balance),
+                        reward.percent_change,
+                        reward
+                            .apr
+                            .map(|apr| format!("{apr:.2}%"))
+                            .unwrap_or_default(),
+                        reward
+                            .commission
+                            .map(|commission| format!("{commission}%"))
+                            .unwrap_or_else(|| "-".to_string()),
+                    )?;
+                }
+                None => {
+                    writeln!(w, "  {:<44}  No rewards in epoch", keyed_reward.address,)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 impl fmt::Display for CliKeyedEpochRewards {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -1049,14 +1108,11 @@ impl fmt::Display for CliKeyedEpochRewards {
 
         if let Some(metadata) = &self.epoch_metadata {
             writeln!(f, "Epoch: {}", metadata.epoch)?;
-            writeln!(f, "Reward Slot: {}", metadata.effective_slot)?;
-            let timestamp = metadata.block_time;
-            writeln!(f, "Block Time: {}", unix_timestamp_to_string(timestamp))?;
         }
         writeln!(f, "Epoch Rewards:")?;
         writeln!(
             f,
-            "  {:<44}  {:<18}  {:<18}  {:>14}  {:>14}  {:>10}",
+            "  {:<44}  {:<18}  {:<18}  {:>14}  {:>7}  {:>10}",
             "Address", "Amount", "New Balance", "Percent Change", "APR", "Commission"
         )?;
         for keyed_reward in &self.rewards {
@@ -1064,7 +1120,7 @@ impl fmt::Display for CliKeyedEpochRewards {
                 Some(reward) => {
                     writeln!(
                         f,
-                        "  {:<44}  ◎{:<17.9}  ◎{:<17.9}  {:>13.9}%  {:>14}  {:>10}",
+                        "  {:<44}  ◎{:<17.9}  ◎{:<17.9}  {:>13.9}%  {:>7}  {:>10}",
                         keyed_reward.address,
                         lamports_to_sol(reward.amount),
                         lamports_to_sol(reward.post_balance),
@@ -2412,6 +2468,25 @@ impl fmt::Display for CliUpgradeableProgramExtended {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliUpgradeableProgramMigrated {
+    pub program_id: String,
+}
+impl QuietDisplay for CliUpgradeableProgramMigrated {}
+impl VerboseDisplay for CliUpgradeableProgramMigrated {}
+impl fmt::Display for CliUpgradeableProgramMigrated {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f)?;
+        writeln!(
+            f,
+            "Migrated Program Id {} from loader-v3 to loader-v4",
+            &self.program_id,
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliUpgradeableBuffer {
@@ -3223,13 +3298,13 @@ mod tests {
     use {
         super::*,
         clap::{App, Arg},
-        solana_sdk::{
-            message::Message,
-            pubkey::Pubkey,
-            signature::{keypair_from_seed, NullSigner, Signature, Signer, SignerError},
-            system_instruction,
-            transaction::Transaction,
-        },
+        solana_keypair::keypair_from_seed,
+        solana_message::Message,
+        solana_pubkey::Pubkey,
+        solana_signature::Signature,
+        solana_signer::{null_signer::NullSigner, Signer, SignerError},
+        solana_system_interface::instruction::transfer,
+        solana_transaction::Transaction,
     };
 
     #[test]
@@ -3267,14 +3342,14 @@ mod tests {
         let fee_payer = absent.pubkey();
         let nonce_auth = bad.pubkey();
         let mut tx = Transaction::new_unsigned(Message::new_with_nonce(
-            vec![system_instruction::transfer(&from, &to, 42)],
+            vec![transfer(&from, &to, 42)],
             Some(&fee_payer),
             &nonce,
             &nonce_auth,
         ));
 
         let signers = vec![present.as_ref(), absent.as_ref(), bad.as_ref()];
-        let blockhash = Hash::new(&[7u8; 32]);
+        let blockhash = Hash::new_from_array([7u8; 32]);
         tx.try_partial_sign(&signers, blockhash).unwrap();
         let res = return_signers(&tx, &OutputFormat::JsonCompact).unwrap();
         let sign_only = parse_sign_only_reply_string(&res);

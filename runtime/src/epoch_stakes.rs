@@ -100,21 +100,20 @@ impl EpochStakes {
         let epoch_authorized_voters = epoch_vote_accounts
             .iter()
             .filter_map(|(key, (stake, account))| {
-                let vote_state = account.vote_state();
+                let vote_state = account.vote_state_view();
 
                 if *stake > 0 {
-                    if let Some(authorized_voter) = vote_state
-                        .authorized_voters()
-                        .get_authorized_voter(leader_schedule_epoch)
+                    if let Some(authorized_voter) =
+                        vote_state.get_authorized_voter(leader_schedule_epoch)
                     {
                         let node_vote_accounts = node_id_to_vote_accounts
-                            .entry(vote_state.node_pubkey)
+                            .entry(*vote_state.node_pubkey())
                             .or_default();
 
                         node_vote_accounts.total_stake += stake;
                         node_vote_accounts.vote_accounts.push(*key);
 
-                        Some((*key, authorized_voter))
+                        Some((*key, *authorized_voter))
                     } else {
                         None
                     }
@@ -249,13 +248,13 @@ pub(crate) mod tests {
         // Create some vote accounts for each pubkey
         (0..num_nodes)
             .map(|_| {
-                let node_id = solana_sdk::pubkey::new_rand();
+                let node_id = solana_pubkey::new_rand();
                 (
                     node_id,
                     iter::repeat_with(|| {
-                        let authorized_voter = solana_sdk::pubkey::new_rand();
+                        let authorized_voter = solana_pubkey::new_rand();
                         VoteAccountInfo {
-                            vote_account: solana_sdk::pubkey::new_rand(),
+                            vote_account: solana_pubkey::new_rand(),
                             account: create_account_with_authorized(
                                 &node_id,
                                 &authorized_voter,

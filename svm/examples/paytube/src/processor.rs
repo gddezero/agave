@@ -1,15 +1,19 @@
 //! A helper to initialize Solana SVM API's `TransactionBatchProcessor`.
 
 use {
+    agave_feature_set::FeatureSet,
     solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
-    solana_compute_budget::compute_budget::ComputeBudget,
-    solana_program_runtime::loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry},
-    solana_sdk::{clock::Slot, feature_set::FeatureSet, transaction},
-    solana_svm::{
-        account_loader::CheckedTransactionDetails,
-        transaction_processing_callback::TransactionProcessingCallback,
-        transaction_processor::TransactionBatchProcessor,
+    solana_compute_budget::compute_budget_limits::ComputeBudgetLimits,
+    solana_fee_structure::FeeDetails,
+    solana_program_runtime::{
+        execution_budget::SVMTransactionExecutionBudget,
+        loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry},
     },
+    solana_sdk::{clock::Slot, transaction},
+    solana_svm::{
+        account_loader::CheckedTransactionDetails, transaction_processor::TransactionBatchProcessor,
+    },
+    solana_svm_callback::TransactionProcessingCallback,
     solana_system_program::system_processor,
     std::sync::{Arc, RwLock},
 };
@@ -35,7 +39,7 @@ impl ForkGraph for PayTubeForkGraph {
 pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallback>(
     callbacks: &CB,
     feature_set: &FeatureSet,
-    compute_budget: &ComputeBudget,
+    compute_budget: &SVMTransactionExecutionBudget,
     fork_graph: Arc<RwLock<PayTubeForkGraph>>,
 ) -> TransactionBatchProcessor<PayTubeForkGraph> {
     // Create a new transaction batch processor.
@@ -47,23 +51,16 @@ pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallba
     // marked as "depoyed" in slot 0.
     // See `solana_svm::program_loader::load_program_with_pubkey` for more
     // details.
-    let processor = TransactionBatchProcessor::<PayTubeForkGraph>::new_uninitialized(
-        /* slot */ 1, /* epoch */ 1,
-    );
-
-    {
-        let mut cache = processor.program_cache.write().unwrap();
-
-        // Initialize the mocked fork graph.
-        cache.fork_graph = Some(Arc::downgrade(&fork_graph));
-
-        // Initialize a proper cache environment.
-        // (Use Loader v4 program to initialize runtime v2 if desired)
-        cache.environments.program_runtime_v1 = Arc::new(
+    let processor = TransactionBatchProcessor::<PayTubeForkGraph>::new(
+        /* slot */ 1,
+        /* epoch */ 1,
+        Arc::downgrade(&fork_graph),
+        Some(Arc::new(
             create_program_runtime_environment_v1(feature_set, compute_budget, false, false)
                 .unwrap(),
-        );
-    }
+        )),
+        None,
+    );
 
     // Add the system program builtin.
     processor.add_builtin(
@@ -97,13 +94,16 @@ pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallba
 /// PayTube, since we don't need to perform such pre-checks.
 pub(crate) fn get_transaction_check_results(
     len: usize,
-    lamports_per_signature: u64,
 ) -> Vec<transaction::Result<CheckedTransactionDetails>> {
+    let compute_budget_limit = ComputeBudgetLimits::default();
     vec![
-        transaction::Result::Ok(CheckedTransactionDetails {
-            nonce: None,
-            lamports_per_signature,
-        });
+        transaction::Result::Ok(CheckedTransactionDetails::new(
+            None,
+            Ok(compute_budget_limit.get_compute_budget_and_limits(
+                compute_budget_limit.loaded_accounts_bytes,
+                FeeDetails::default()
+            )),
+        ));
         len
     ]
 }

@@ -119,7 +119,11 @@ pub enum UiExtension {
     GroupMemberPointer(UiGroupMemberPointer),
     TokenGroup(UiTokenGroup),
     TokenGroupMember(UiTokenGroupMember),
+    ConfidentialMintBurn(UiConfidentialMintBurn),
     UnparseableExtension,
+    ScaledUiAmountConfig(UiScaledUiAmountConfig),
+    PausableConfig(UiPausableConfig),
+    PausableAccount,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,7 +131,7 @@ pub enum UiExtension {
 pub struct UiTokenGroupMember {
     pub mint: String,
     pub group: String,
-    pub member_number: u32,
+    pub member_number: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,8 +139,8 @@ pub struct UiTokenGroupMember {
 pub struct UiTokenGroup {
     pub update_authority: Option<String>,
     pub mint: String,
-    pub size: u32,
-    pub max_size: u32,
+    pub size: u64,
+    pub max_size: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -290,6 +294,15 @@ pub struct UiTokenMetadata {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct UiConfidentialMintBurn {
+    pub confidential_supply: String,
+    pub decryptable_supply: String,
+    pub supply_elgamal_pubkey: String,
+    pub pending_burn: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct UiMint {
     pub mint_authority: Option<String>,
     pub supply: String,
@@ -307,4 +320,20 @@ pub struct UiMultisig {
     pub num_valid_signers: u8,
     pub is_initialized: bool,
     pub signers: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiScaledUiAmountConfig {
+    pub authority: Option<String>,
+    pub multiplier: String,
+    pub new_multiplier_effective_timestamp: i64,
+    pub new_multiplier: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiPausableConfig {
+    pub authority: Option<String>,
+    pub paused: bool,
 }

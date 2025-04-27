@@ -18,12 +18,11 @@ pub(crate) struct NewEpochTimings {
 
 #[derive(Debug, Default)]
 pub(crate) struct RewardsMetrics {
-    pub(crate) load_vote_and_stake_accounts_us: AtomicU64,
     pub(crate) calculate_points_us: AtomicU64,
     pub(crate) redeem_rewards_us: u64,
     pub(crate) store_stake_accounts_us: AtomicU64,
     pub(crate) store_vote_accounts_us: AtomicU64,
-    pub(crate) vote_accounts_cache_miss_count: usize,
+    pub(crate) vote_accounts_cache_miss_count: AtomicU64,
     pub(crate) hash_partition_rewards_us: u64,
 }
 
@@ -46,6 +45,7 @@ pub(crate) struct NewBankTimings {
     pub(crate) cache_preparation_time_us: u64,
     pub(crate) update_sysvars_time_us: u64,
     pub(crate) fill_sysvar_cache_time_us: u64,
+    pub(crate) populate_cache_for_accounts_lt_hash_us: Option<u64>,
 }
 
 pub(crate) fn report_new_epoch_metrics(
@@ -78,11 +78,6 @@ pub(crate) fn report_new_epoch_metrics(
             i64
         ),
         (
-            "load_vote_and_stake_accounts_us",
-            metrics.load_vote_and_stake_accounts_us.load(Relaxed),
-            i64
-        ),
-        (
             "calculate_points_us",
             metrics.calculate_points_us.load(Relaxed),
             i64
@@ -100,7 +95,7 @@ pub(crate) fn report_new_epoch_metrics(
         ),
         (
             "vote_accounts_cache_miss_count",
-            metrics.vote_accounts_cache_miss_count,
+            metrics.vote_accounts_cache_miss_count.load(Relaxed),
             i64
         ),
         (
@@ -115,6 +110,7 @@ pub(crate) fn report_new_bank_metrics(
     slot: Slot,
     parent_slot: Slot,
     block_height: u64,
+    num_accounts_modified_this_slot: Option<usize>,
     timings: NewBankTimings,
 ) {
     datapoint_info!(
@@ -163,6 +159,16 @@ pub(crate) fn report_new_bank_metrics(
             "fill_sysvar_cache_us",
             timings.fill_sysvar_cache_time_us,
             i64
+        ),
+        (
+            "num_accounts_modified_this_slot",
+            num_accounts_modified_this_slot,
+            Option<i64>
+        ),
+        (
+            "populate_cache_for_accounts_lt_hash_us",
+            timings.populate_cache_for_accounts_lt_hash_us,
+            Option<i64>
         ),
     );
 }

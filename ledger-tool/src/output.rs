@@ -4,10 +4,12 @@ use {
         ledger_utils::get_program_ids,
     },
     chrono::{Local, TimeZone},
+    itertools::Either,
+    pretty_hex::PrettyHex,
     serde::ser::{Impossible, SerializeSeq, SerializeStruct, Serializer},
     serde_derive::{Deserialize, Serialize},
     solana_account_decoder::{encode_ui_account, UiAccountData, UiAccountEncoding},
-    solana_accounts_db::accounts_index::ScanConfig,
+    solana_accounts_db::accounts_index::{ScanConfig, ScanOrder},
     solana_cli_output::{
         display::writeln_transaction, CliAccount, CliAccountNewConfig, OutputFormat, QuietDisplay,
         VerboseDisplay,
@@ -15,7 +17,7 @@ use {
     solana_ledger::{
         blockstore::{Blockstore, BlockstoreError},
         blockstore_meta::{DuplicateSlotProof, ErasureMeta},
-        shred::{Shred, ShredType},
+        shred::{self, Shred, ShredType},
     },
     solana_runtime::bank::{Bank, TotalAccountsStats},
     solana_sdk::{
@@ -361,6 +363,7 @@ pub struct CliDuplicateShred {
     merkle_root: Option<Hash>,
     chained_merkle_root: Option<Hash>,
     last_in_slot: bool,
+    #[serde(with = "serde_bytes")]
     payload: Vec<u8>,
 }
 
@@ -406,7 +409,7 @@ impl From<Shred> for CliDuplicateShred {
             merkle_root: shred.merkle_root().ok(),
             chained_merkle_root: shred.chained_merkle_root().ok(),
             last_in_slot: shred.last_in_slot(),
-            payload: shred.payload().clone(),
+            payload: shred::Payload::unwrap_or_clone(shred.payload().clone()),
         }
     }
 }
@@ -513,15 +516,15 @@ pub struct BlockWithoutMetadata {
 }
 
 impl BlockContents {
-    pub fn transactions(&self) -> Box<dyn Iterator<Item = &VersionedTransaction> + '_> {
+    pub fn transactions(&self) -> impl Iterator<Item = &VersionedTransaction> {
         match self {
-            BlockContents::VersionedConfirmedBlock(block) => Box::new(
+            BlockContents::VersionedConfirmedBlock(block) => Either::Left(
                 block
                     .transactions
                     .iter()
                     .map(|VersionedTransactionWithStatusMeta { transaction, .. }| transaction),
             ),
-            BlockContents::BlockWithoutMetadata(block) => Box::new(block.transactions.iter()),
+            BlockContents::BlockWithoutMetadata(block) => Either::Right(block.transactions.iter()),
         }
     }
 }
@@ -584,7 +587,11 @@ pub fn output_slot(
         Err(_) => {
             // Transaction metadata could be missing, try to fetch just the
             // entries and leave the metadata fields empty
-            let entries = blockstore.get_slot_entries(slot, /*shred_start_index:*/ 0)?;
+            let (entries, _, _) = blockstore.get_slot_entries_with_shred_info(
+                slot,
+                /*shred_start_index:*/ 0,
+                allow_dead_slots,
+            )?;
 
             let blockhash = entries
                 .last()
@@ -904,7 +911,7 @@ impl AccountsScanner {
             }),
             AccountsOutputMode::Program(program_pubkey) => self
                 .bank
-                .get_program_accounts(program_pubkey, &ScanConfig::new(false))
+                .get_program_accounts(program_pubkey, &ScanConfig::new(ScanOrder::Sorted))
                 .unwrap()
                 .iter()
                 .filter(|(_, account)| self.should_process_account(account))
@@ -932,6 +939,28 @@ impl serde::Serialize for AccountsScanner {
         seq_serializer.unwrap().end()
     }
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct CliAccounts {
+    pub accounts: Vec<CliAccount>,
+}
+
+impl fmt::Display for CliAccounts {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for account in &self.accounts {
+            write!(f, "{account}")?;
+            let account_data = account.keyed_account.account.data.decode();
+            if let Some(data) = account_data {
+                if !data.is_empty() {
+                    writeln!(f, "{:?}", data.hex_dump())?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+impl QuietDisplay for CliAccounts {}
+impl VerboseDisplay for CliAccounts {}
 
 pub fn output_account(
     pubkey: &Pubkey,

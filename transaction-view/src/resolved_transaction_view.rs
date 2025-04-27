@@ -2,22 +2,21 @@ use {
     crate::{
         result::{Result, TransactionViewError},
         transaction_data::TransactionData,
+        transaction_version::TransactionVersion,
         transaction_view::TransactionView,
     },
     core::{
         fmt::{Debug, Formatter},
         ops::Deref,
     },
-    solana_sdk::{
-        bpf_loader_upgradeable, ed25519_program,
-        hash::Hash,
-        message::{v0::LoadedAddresses, AccountKeys, TransactionSignatureDetails},
-        pubkey::Pubkey,
-        secp256k1_program,
-    },
+    solana_hash::Hash,
+    solana_message::{v0::LoadedAddresses, AccountKeys},
+    solana_pubkey::Pubkey,
+    solana_sdk_ids::bpf_loader_upgradeable,
+    solana_signature::Signature,
     solana_svm_transaction::{
         instruction::SVMInstruction, message_address_table_lookup::SVMMessageAddressTableLookup,
-        svm_message::SVMMessage,
+        svm_message::SVMMessage, svm_transaction::SVMTransaction,
     },
     std::collections::HashSet,
 };
@@ -30,7 +29,9 @@ pub struct ResolvedTransactionView<D: TransactionData> {
     /// The resolved address lookups.
     resolved_addresses: Option<LoadedAddresses>,
     /// A cache for whether an address is writable.
-    writable_cache: Vec<bool>, // TODO: should this be a vec, bitset, or array[256].
+    // Sanitized transactions are guaranteed to have a maximum of 256 keys,
+    // because account indexing is done with a u8.
+    writable_cache: [bool; 256],
 }
 
 impl<D: TransactionData> Deref for ResolvedTransactionView<D> {
@@ -54,6 +55,11 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
         // verify that the number of readable and writable match up.
         // This is a basic sanity check to make sure we're not passing a totally
         // invalid set of resolved addresses.
+        // Additionally if it is a v0 transaction it *must* have resolved
+        // addresses, even if they are empty.
+        if matches!(view.version(), TransactionVersion::V0) && resolved_addresses_ref.is_none() {
+            return Err(TransactionViewError::AddressLookupMismatch);
+        }
         if let Some(loaded_addresses) = resolved_addresses_ref {
             if loaded_addresses.writable.len() != usize::from(view.total_writable_lookup_accounts())
                 || loaded_addresses.readonly.len()
@@ -84,12 +90,12 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
         view: &TransactionView<true, D>,
         resolved_addresses: Option<&LoadedAddresses>,
         reserved_account_keys: &HashSet<Pubkey>,
-    ) -> Vec<bool> {
+    ) -> [bool; 256] {
         // Build account keys so that we can iterate over and check if
         // an address is writable.
         let account_keys = AccountKeys::new(view.static_account_keys(), resolved_addresses);
 
-        let mut is_writable_cache = Vec::with_capacity(account_keys.len());
+        let mut is_writable_cache = [false; 256];
         let num_static_account_keys = usize::from(view.num_static_account_keys());
         let num_writable_lookup_accounts = usize::from(view.total_writable_lookup_accounts());
         let num_signed_accounts = usize::from(view.num_required_signatures());
@@ -113,7 +119,7 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
             };
 
             // If the key is reserved it cannot be writable.
-            is_writable_cache.push(is_requested_write && !reserved_account_keys.contains(key));
+            is_writable_cache[index] = is_requested_write && !reserved_account_keys.contains(key);
         }
 
         // If a program account is locked, it cannot be writable unless the
@@ -140,49 +146,18 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
         is_writable_cache
     }
 
-    fn num_readonly_accounts(&self) -> usize {
-        usize::from(self.view.total_readonly_lookup_accounts())
-            .wrapping_add(usize::from(self.view.num_readonly_signed_static_accounts()))
-            .wrapping_add(usize::from(
-                self.view.num_readonly_unsigned_static_accounts(),
-            ))
-    }
-
-    fn signature_details(&self) -> TransactionSignatureDetails {
-        // counting the number of pre-processor operations separately
-        let mut num_secp256k1_instruction_signatures: u64 = 0;
-        let mut num_ed25519_instruction_signatures: u64 = 0;
-        for (program_id, instruction) in self.program_instructions_iter() {
-            if secp256k1_program::check_id(program_id) {
-                if let Some(num_verifies) = instruction.data.first() {
-                    num_secp256k1_instruction_signatures =
-                        num_secp256k1_instruction_signatures.wrapping_add(u64::from(*num_verifies));
-                }
-            } else if ed25519_program::check_id(program_id) {
-                if let Some(num_verifies) = instruction.data.first() {
-                    num_ed25519_instruction_signatures =
-                        num_ed25519_instruction_signatures.wrapping_add(u64::from(*num_verifies));
-                }
-            }
-        }
-
-        TransactionSignatureDetails::new(
-            u64::from(self.view.num_required_signatures()),
-            num_secp256k1_instruction_signatures,
-            num_ed25519_instruction_signatures,
-        )
+    pub fn loaded_addresses(&self) -> Option<&LoadedAddresses> {
+        self.resolved_addresses.as_ref()
     }
 }
 
 impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
-    fn num_total_signatures(&self) -> u64 {
-        self.signature_details().total_signatures()
+    fn num_transaction_signatures(&self) -> u64 {
+        u64::from(self.view.num_required_signatures())
     }
 
     fn num_write_locks(&self) -> u64 {
-        self.account_keys()
-            .len()
-            .wrapping_sub(self.num_readonly_accounts()) as u64
+        self.view.num_requested_write_locks()
     }
 
     fn recent_blockhash(&self) -> &Hash {
@@ -201,11 +176,15 @@ impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
         &self,
     ) -> impl Iterator<
         Item = (
-            &solana_sdk::pubkey::Pubkey,
+            &solana_pubkey::Pubkey,
             solana_svm_transaction::instruction::SVMInstruction,
         ),
     > + Clone {
         self.view.program_instructions_iter()
+    }
+
+    fn static_account_keys(&self) -> &[Pubkey] {
+        self.view.static_account_keys()
     }
 
     fn account_keys(&self) -> AccountKeys {
@@ -245,6 +224,16 @@ impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
     }
 }
 
+impl<D: TransactionData> SVMTransaction for ResolvedTransactionView<D> {
+    fn signature(&self) -> &Signature {
+        &self.view.signatures()[0]
+    }
+
+    fn signatures(&self) -> &[Signature] {
+        self.view.signatures()
+    }
+}
+
 impl<D: TransactionData> Debug for ResolvedTransactionView<D> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedTransactionView")
@@ -258,16 +247,14 @@ mod tests {
     use {
         super::*,
         crate::transaction_view::SanitizedTransactionView,
-        solana_sdk::{
-            instruction::CompiledInstruction,
-            message::{
-                v0::{self, MessageAddressTableLookup},
-                MessageHeader, VersionedMessage,
-            },
-            signature::Signature,
-            system_program, sysvar,
-            transaction::VersionedTransaction,
+        solana_message::{
+            compiled_instruction::CompiledInstruction,
+            v0::{self, MessageAddressTableLookup},
+            MessageHeader, VersionedMessage,
         },
+        solana_sdk_ids::{system_program, sysvar},
+        solana_signature::Signature,
+        solana_transaction::versioned::VersionedTransaction,
     };
 
     #[test]
