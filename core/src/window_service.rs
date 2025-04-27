@@ -290,15 +290,9 @@ impl WindowService {
             exit.clone(),
             repair_socket,
             ancestor_hashes_socket,
-            repair_request_quic_sender,
-            ancestor_hashes_request_quic_sender,
-            ancestor_hashes_response_quic_receiver,
             repair_info,
-            verified_vote_receiver,
             outstanding_repair_requests.clone(),
-            ancestor_hashes_replay_update_receiver,
-            dumped_slots_receiver,
-            popular_pruned_forks_sender,
+            repair_service_channels,
         );
 
         let (duplicate_sender, duplicate_receiver) = unbounded();

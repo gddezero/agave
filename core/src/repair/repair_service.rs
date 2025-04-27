@@ -662,7 +662,7 @@ impl RepairService {
         if !batch.is_empty() {
             let num_pkts = batch.len();
             let batch = batch.iter().map(|(bytes, addr)| (bytes, addr));
-            match batch_send(repair_socket, batch) {
+            match batch_send(repair_socket, &batch) {
                 Ok(()) => (),
                 Err(SendPktsError::IoError(err, num_failed)) => {
                     error!(
@@ -1063,7 +1063,7 @@ impl RepairService {
         let reqs = [(&packet_buf, address)];
 
         // Send packet batch
-        match batch_send(repair_socket, reqs) {
+        match batch_send(repair_socket, &reqs[..]) {
             Ok(()) => {
                 debug!("successfully sent repair request to {pubkey} / {address}!");
             }
