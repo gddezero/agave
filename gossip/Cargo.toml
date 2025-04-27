@@ -42,6 +42,7 @@ solana-frozen-abi = { workspace = true, optional = true, features = [
 solana-frozen-abi-macro = { workspace = true, optional = true, features = [
     "frozen-abi",
 ] }
+solana-hash = { workspace = true }
 solana-ledger = { workspace = true }
 solana-logger = { workspace = true }
 solana-measure = { workspace = true }
@@ -56,7 +57,9 @@ solana-sdk = { workspace = true }
 solana-serde-varint = { workspace = true }
 solana-short-vec = { workspace = true }
 solana-streamer = { workspace = true }
+solana-time-utils = { workspace = true }
 solana-tpu-client = { workspace = true }
+solana-transaction = { workspace = true }
 solana-version = { workspace = true }
 solana-vote = { workspace = true }
 solana-vote-program = { workspace = true }
