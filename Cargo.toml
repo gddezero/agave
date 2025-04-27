@@ -3,6 +3,12 @@ inherits = "release"
 debug = true
 split-debuginfo = "packed"
 
+[profile.release-with-lto]
+inherits = "release"
+split-debuginfo = "unpacked"
+lto = "thin"
+codegen-units = 1
+
 [workspace]
 members = [
     "account-decoder",
